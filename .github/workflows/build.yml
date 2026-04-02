@@ -1,0 +1,201 @@
+name: Build PHP SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: "PHP version to build (e.g. 8.5.2, 8.4.7, 8.3.20)"
+        required: true
+        type: string
+
+env:
+  SPC_VERSION: "2.8.3"
+  PHP_EXTENSIONS: "bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,hash,iconv,mbstring,mysqli,mysqlnd,openssl,pcntl,pcre,pdo,pdo_mysql,phar,posix,session,simplexml,sodium,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
+
+jobs:
+  build-linux:
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            spc_arch: x86_64
+          - arch: aarch64
+            runner: ubuntu-latest
+            spc_arch: aarch64
+    steps:
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential autoconf automake bison \
+            cmake flex libtool make pkg-config re2c
+
+      - name: Install cross-compilation tools (aarch64)
+        if: matrix.arch == 'aarch64'
+        run: sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Download spc
+        run: |
+          curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-linux-${{ matrix.spc_arch }}.tar.gz" \
+            | tar xz -C /usr/local/bin
+
+      - name: Download PHP sources
+        run: |
+          spc download \
+            --with-php=${{ inputs.php_version }} \
+            --for-extensions=${{ env.PHP_EXTENSIONS }} \
+            --prefer-pre-built
+
+      - name: Run spc doctor
+        run: spc doctor --auto-fix || true
+
+      - name: Build libphp.a
+        run: |
+          spc build ${{ env.PHP_EXTENSIONS }} \
+            --build-embed \
+            --no-strip
+
+      - name: Package SDK
+        run: |
+          mkdir -p sdk/lib sdk/include
+          cp buildroot/lib/libphp.a sdk/lib/
+          cp -r buildroot/include/php sdk/include/php
+          tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz -C sdk .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}
+          path: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz
+
+  build-macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: macos-latest
+            spc_arch: aarch64
+          - arch: x86_64
+            runner: macos-13
+            spc_arch: x86_64
+    steps:
+      - name: Set up PHP (needed by spc for Composer)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+
+      - name: Install system dependencies
+        run: |
+          brew install autoconf automake bison cmake flex libtool \
+            make pkg-config re2c
+
+      - name: Download spc
+        run: |
+          curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-macos-${{ matrix.spc_arch }}.tar.gz" \
+            | tar xz -C /usr/local/bin
+
+      - name: Download PHP sources
+        run: |
+          spc download \
+            --with-php=${{ inputs.php_version }} \
+            --for-extensions=${{ env.PHP_EXTENSIONS }} \
+            --prefer-pre-built
+
+      - name: Run spc doctor
+        run: spc doctor --auto-fix || true
+
+      - name: Build libphp.a
+        run: |
+          spc build ${{ env.PHP_EXTENSIONS }} \
+            --build-embed \
+            --no-strip
+
+      - name: Package SDK
+        run: |
+          mkdir -p sdk/lib sdk/include
+          cp buildroot/lib/libphp.a sdk/lib/
+          cp -r buildroot/include/php sdk/include/php
+          tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}
+          path: php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz
+
+  build-windows:
+    name: Windows (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download PHP Windows SDK
+        run: |
+          PHP_VERSION="${{ inputs.php_version }}"
+          BASE_URL="https://windows.php.net/downloads/releases/latest"
+          mkdir -p sdk/lib sdk/include
+
+          # Download main NTS package (contains php8embed.dll)
+          curl -fsSL "${BASE_URL}/php-${PHP_VERSION}-nts-Win32-vs17-x64-latest.zip" -o php-nts.zip
+          unzip -q php-nts.zip -d php-nts
+          cp php-nts/php8embed.dll sdk/lib/
+
+          # Download devel pack (contains php8embed.lib + headers)
+          curl -fsSL "${BASE_URL}/php-devel-pack-${PHP_VERSION}-nts-Win32-vs17-x64-latest.zip" -o php-devel.zip
+          unzip -q php-devel.zip -d php-devel
+
+          # Find the extracted directory (name varies)
+          DEVEL_DIR=$(find php-devel -maxdepth 1 -type d -name "php-*" | head -1)
+          cp "${DEVEL_DIR}/lib/php8embed.lib" sdk/lib/
+          cp -r "${DEVEL_DIR}/include" sdk/include/php
+
+      - name: Package SDK
+        run: |
+          tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz -C sdk .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-sdk-${{ inputs.php_version }}-windows-x86_64
+          path: php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz
+
+  release:
+    name: Create Release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.php_version }}
+          name: PHP ${{ inputs.php_version }}
+          body: |
+            Pre-built PHP embed SAPI SDK for ephpm.
+
+            **PHP version:** ${{ inputs.php_version }}
+            **Extensions:** ${{ env.PHP_EXTENSIONS }}
+
+            ## Artifacts
+
+            | File | Platform |
+            |------|----------|
+            | `php-sdk-${{ inputs.php_version }}-linux-x86_64.tar.gz` | Linux x86_64 (musl static) |
+            | `php-sdk-${{ inputs.php_version }}-linux-aarch64.tar.gz` | Linux aarch64 (musl static) |
+            | `php-sdk-${{ inputs.php_version }}-macos-x86_64.tar.gz` | macOS Intel |
+            | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
+            | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (NTS) |
+          files: artifacts/*.tar.gz
