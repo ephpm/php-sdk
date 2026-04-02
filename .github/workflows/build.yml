@@ -58,7 +58,8 @@ jobs:
         run: |
           spc build ${{ env.PHP_EXTENSIONS }} \
             --build-embed \
-            --no-strip
+            --no-strip \
+            --debug
 
       - name: Package SDK
         run: |
@@ -120,7 +121,8 @@ jobs:
         run: |
           spc build ${{ env.PHP_EXTENSIONS }} \
             --build-embed \
-            --no-strip
+            --no-strip \
+            --debug
 
       - name: Package SDK
         run: |
@@ -142,16 +144,16 @@ jobs:
       - name: Download PHP Windows SDK
         run: |
           PHP_VERSION="${{ inputs.php_version }}"
-          BASE_URL="https://windows.php.net/downloads/releases/latest"
+          BASE_URL="https://windows.php.net/downloads/releases"
           mkdir -p sdk/lib sdk/include
 
           # Download main NTS package (contains php8embed.dll)
-          curl -fsSL "${BASE_URL}/php-${PHP_VERSION}-nts-Win32-vs17-x64-latest.zip" -o php-nts.zip
+          curl -fsSL -L "${BASE_URL}/php-${PHP_VERSION}-nts-Win32-vs17-x64.zip" -o php-nts.zip
           unzip -q php-nts.zip -d php-nts
           cp php-nts/php8embed.dll sdk/lib/
 
           # Download devel pack (contains php8embed.lib + headers)
-          curl -fsSL "${BASE_URL}/php-devel-pack-${PHP_VERSION}-nts-Win32-vs17-x64-latest.zip" -o php-devel.zip
+          curl -fsSL -L "${BASE_URL}/php-devel-pack-${PHP_VERSION}-nts-Win32-vs17-x64.zip" -o php-devel.zip
           unzip -q php-devel.zip -d php-devel
 
           # Find the extracted directory (name varies)
