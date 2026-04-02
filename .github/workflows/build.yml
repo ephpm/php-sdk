@@ -39,8 +39,10 @@ jobs:
 
       - name: Download spc
         run: |
+          mkdir -p "$HOME/bin"
           curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-linux-${{ matrix.spc_arch }}.tar.gz" \
-            | tar xz -C /usr/local/bin
+            | tar xz -C "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
       - name: Download PHP sources
         run: |
