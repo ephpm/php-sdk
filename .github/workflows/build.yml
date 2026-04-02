@@ -207,8 +207,8 @@ jobs:
           # Step 1: decompress xz → tar
           & $sevenZip x $archive.FullName "-o$($archive.DirectoryName)" -y
           if ($LASTEXITCODE -ne 0) { throw "7za decompression failed" }
-          # Step 2: extract tar → source/php-src
-          tar -xf $tarFile -C $dest --strip-components 1
+          # Step 2: extract tar → source/php-src (use Windows tar, not MinGW tar)
+          & "$env:SystemRoot\System32\tar.exe" -xf $tarFile -C $dest --strip-components 1
           if ($LASTEXITCODE -ne 0) { throw "tar extraction failed" }
           Remove-Item $tarFile -ErrorAction SilentlyContinue
 
