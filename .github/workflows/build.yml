@@ -27,6 +27,10 @@ jobs:
             runner: ubuntu-24.04-arm
             spc_arch: aarch64
     steps:
+      - name: Clean up previous builds
+        if: ${{ !contains(matrix.runner, 'ubuntu') }}
+        run: rm -rf buildroot source downloads sdk *.tar.gz
+
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
@@ -60,6 +64,7 @@ jobs:
         run: |
           spc build ${{ env.PHP_EXTENSIONS }} \
             --build-embed \
+            --enable-zts \
             --no-strip \
             --debug
 
@@ -86,9 +91,6 @@ jobs:
           - arch: aarch64
             runner: macos-latest
             spc_arch: aarch64
-          - arch: x86_64
-            runner: macos-13
-            spc_arch: x86_64
     steps:
       # spc is a PHP app — needs a host PHP CLI to run. This does NOT
       # affect the PHP version being built (that's inputs.php_version).
@@ -101,6 +103,13 @@ jobs:
         run: |
           brew install autoconf automake bison cmake flex libtool \
             make pkg-config re2c
+
+      # Use Homebrew LLVM instead of Apple clang — Apple clang crashes
+      # on PHP's JIT code (zend_jit_vm_helpers.c, exit code 70).
+      - name: Install LLVM and prepend to PATH
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Download spc
         run: |
@@ -123,6 +132,7 @@ jobs:
         run: |
           spc build ${{ env.PHP_EXTENSIONS }} \
             --build-embed \
+            --enable-zts \
             --no-strip \
             --debug
 
@@ -141,30 +151,64 @@ jobs:
 
   build-windows:
     name: Windows (x86_64)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, windows, x64]
+    # Windows doesn't support pcntl or posix
+    env:
+      WIN_PHP_EXTENSIONS: "bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,hash,iconv,mbstring,mysqli,mysqlnd,openssl,pcre,pdo,pdo_mysql,phar,session,simplexml,sodium,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
     steps:
-      - name: Download PHP Windows SDK
+      - name: Clean up previous builds
+        shell: pwsh
         run: |
-          PHP_VERSION="${{ inputs.php_version }}"
-          BASE_URL="https://windows.php.net/downloads/releases"
-          mkdir -p sdk/lib sdk/include
+          foreach ($dir in @('buildroot', 'source', 'downloads', 'sdk')) {
+            if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          }
+          Remove-Item -Force *.tar.gz -ErrorAction SilentlyContinue
 
-          # Download main NTS package (contains php8embed.dll)
-          curl -fsSL -L "${BASE_URL}/php-${PHP_VERSION}-nts-Win32-vs17-x64.zip" -o php-nts.zip
-          unzip -q php-nts.zip -d php-nts
-          cp php-nts/php8embed.dll sdk/lib/
+      - name: Install PHP (host toolchain for spc)
+        shell: pwsh
+        run: |
+          if (Test-Path C:\php) { Remove-Item -Recurse -Force C:\php }
+          Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/php-8.4.19-nts-Win32-vs17-x64.zip" -OutFile php.zip
+          Expand-Archive -Path php.zip -DestinationPath C:\php
+          "C:\php" | Out-File -Append -FilePath $env:GITHUB_PATH
 
-          # Download devel pack (contains php8embed.lib + headers)
-          curl -fsSL -L "${BASE_URL}/php-devel-pack-${PHP_VERSION}-nts-Win32-vs17-x64.zip" -o php-devel.zip
-          unzip -q php-devel.zip -d php-devel
+      - name: Download spc
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
+          "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
 
-          # Find the extracted directory (name varies)
-          DEVEL_DIR=$(find php-devel -maxdepth 1 -type d -name "php-*" | head -1)
-          cp "${DEVEL_DIR}/lib/php8embed.lib" sdk/lib/
-          cp -r "${DEVEL_DIR}/include" sdk/include/php
+      - name: Download PHP sources
+        shell: pwsh
+        run: |
+          spc download `
+            --with-php=${{ inputs.php_version }} `
+            --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
+            --prefer-pre-built
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run spc doctor
+        shell: pwsh
+        run: spc doctor --auto-fix; $true
+
+      - name: Build php8embed
+        shell: pwsh
+        run: |
+          spc build ${{ env.WIN_PHP_EXTENSIONS }} `
+            --build-embed `
+            --enable-zts `
+            --no-strip `
+            --debug
 
       - name: Package SDK
+        shell: pwsh
         run: |
+          New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
+          if (Test-Path buildroot/lib/php8embed.lib) { Copy-Item buildroot/lib/php8embed.lib sdk/lib/ }
+          if (Test-Path buildroot/bin/php8embed.dll) { Copy-Item buildroot/bin/php8embed.dll sdk/lib/ }
+          if (Test-Path buildroot/lib/libphp.a) { Copy-Item buildroot/lib/libphp.a sdk/lib/ }
+          Copy-Item -Recurse buildroot/include/php sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -205,7 +249,6 @@ jobs:
             |------|----------|
             | `php-sdk-${{ inputs.php_version }}-linux-x86_64.tar.gz` | Linux x86_64 (musl static) |
             | `php-sdk-${{ inputs.php_version }}-linux-aarch64.tar.gz` | Linux aarch64 (musl static) |
-            | `php-sdk-${{ inputs.php_version }}-macos-x86_64.tar.gz` | macOS Intel |
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
-            | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (NTS) |
+            | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
           files: artifacts/*.tar.gz
