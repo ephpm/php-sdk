@@ -85,10 +85,12 @@ jobs:
             runner: macos-13
             spc_arch: x86_64
     steps:
-      - name: Set up PHP (needed by spc for Composer)
+      # spc is a PHP app — needs a host PHP CLI to run. This does NOT
+      # affect the PHP version being built (that's inputs.php_version).
+      - name: Set up PHP (host toolchain for spc)
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.4"
+          php-version: "8.5"
 
       - name: Install system dependencies
         run: |
