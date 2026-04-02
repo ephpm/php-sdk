@@ -1,0 +1,6 @@
+buildroot/
+downloads/
+source/
+sdk/
+*.tar.gz
+*.zip
