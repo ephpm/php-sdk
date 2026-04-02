@@ -171,17 +171,13 @@ jobs:
           Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/php-8.4.19-nts-Win32-vs17-x64.zip" -OutFile php.zip
           Expand-Archive -Path php.zip -DestinationPath C:\php
           "C:\php" | Out-File -Append -FilePath $env:GITHUB_PATH
-
-      - name: Download spc
-        shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
-          "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
+          # spc needs Git MinGW tools (patch, etc.)
+          "C:\Program Files\Git\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Download PHP sources
         shell: pwsh
         run: |
-          spc download `
+          C:\php\php.exe C:\spc-src\bin\spc download `
             --with-php=${{ inputs.php_version }} `
             --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
             --prefer-pre-built
@@ -190,12 +186,12 @@ jobs:
 
       - name: Run spc doctor
         shell: pwsh
-        run: spc doctor --auto-fix; $true
+        run: C:\php\php.exe C:\spc-src\bin\spc doctor --auto-fix; $true
 
       - name: Build php8embed
         shell: pwsh
         run: |
-          spc build ${{ env.WIN_PHP_EXTENSIONS }} `
+          C:\php\php.exe C:\spc-src\bin\spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --build-embed `
             --enable-zts `
             --no-strip `
