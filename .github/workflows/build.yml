@@ -194,6 +194,24 @@ jobs:
         shell: pwsh
         run: spc doctor --auto-fix; $true
 
+      - name: Pre-extract PHP source (work around Windows pipe bug in spc)
+        shell: pwsh
+        run: |
+          # spc's 7za-to-tar pipe breaks on Windows ("The pipe has been ended").
+          # Extract in two steps: decompress .tar.xz → .tar on disk, then untar.
+          $archive = Get-ChildItem downloads/php-*.tar.xz | Select-Object -First 1
+          $tarFile = $archive.FullName -replace '\.xz$', ''
+          $dest = "source\php-src"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $sevenZip = Join-Path $PWD "php-sdk-binary-tools\bin\7za.exe"
+          # Step 1: decompress xz → tar
+          & $sevenZip x $archive.FullName "-o$($archive.DirectoryName)" -y
+          if ($LASTEXITCODE -ne 0) { throw "7za decompression failed" }
+          # Step 2: extract tar → source/php-src
+          tar -xf $tarFile -C $dest --strip-components 1
+          if ($LASTEXITCODE -ne 0) { throw "tar extraction failed" }
+          Remove-Item $tarFile -ErrorAction SilentlyContinue
+
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: pwsh
         run: |
