@@ -203,14 +203,51 @@ jobs:
             --no-strip `
             --debug
 
+      - name: Find build outputs
+        shell: pwsh
+        run: |
+          Write-Host "==> Searching for php8embed files..."
+          Get-ChildItem -Recurse -Filter "php8embed.*" | ForEach-Object { Write-Host $_.FullName }
+          Write-Host "==> Searching for libphp files..."
+          Get-ChildItem -Recurse -Filter "libphp.*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+
       - name: Package SDK
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
-          if (Test-Path buildroot/lib/php8embed.lib) { Copy-Item buildroot/lib/php8embed.lib sdk/lib/ }
-          if (Test-Path buildroot/bin/php8embed.dll) { Copy-Item buildroot/bin/php8embed.dll sdk/lib/ }
-          if (Test-Path buildroot/lib/libphp.a) { Copy-Item buildroot/lib/libphp.a sdk/lib/ }
+
+          # Find php8embed.dll — check common spc output locations
+          $dll = Get-ChildItem -Recurse -Filter "php8embed.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($dll) {
+            Copy-Item $dll.FullName sdk/lib/
+            Write-Host "==> Found php8embed.dll at $($dll.FullName)"
+          } else {
+            Write-Error "php8embed.dll not found anywhere in build tree"
+            exit 1
+          }
+
+          # Find php8embed.lib
+          $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lib) {
+            Copy-Item $lib.FullName sdk/lib/
+            Write-Host "==> Found php8embed.lib at $($lib.FullName)"
+          } else {
+            Write-Error "php8embed.lib not found anywhere in build tree"
+            exit 1
+          }
+
+          # Optional: libphp.a (static lib, may not exist on Windows)
+          $static = Get-ChildItem -Recurse -Filter "libphp.a" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($static) {
+            Copy-Item $static.FullName sdk/lib/
+            Write-Host "==> Found libphp.a at $($static.FullName)"
+          }
+
           Copy-Item -Recurse buildroot/include/php sdk/include/php
+
+          Write-Host "==> SDK contents:"
+          Get-ChildItem -Recurse sdk/lib/
+
           tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz -C sdk .
 
       - name: Upload artifact
