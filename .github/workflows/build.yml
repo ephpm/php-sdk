@@ -208,6 +208,8 @@ jobs:
         run: |
           Write-Host "==> Searching for php8embed files..."
           Get-ChildItem -Recurse -Filter "php8embed.*" | ForEach-Object { Write-Host $_.FullName }
+          Write-Host "==> Searching for php8ts files..."
+          Get-ChildItem -Recurse -Filter "php8ts.*" | ForEach-Object { Write-Host $_.FullName }
           Write-Host "==> Searching for libphp files..."
           Get-ChildItem -Recurse -Filter "libphp.*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
@@ -216,23 +218,30 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
 
-          # Find php8embed.dll — check common spc output locations
-          $dll = Get-ChildItem -Recurse -Filter "php8embed.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($dll) {
-            Copy-Item $dll.FullName sdk/lib/
-            Write-Host "==> Found php8embed.dll at $($dll.FullName)"
-          } else {
-            Write-Error "php8embed.dll not found anywhere in build tree"
-            exit 1
-          }
-
-          # Find php8embed.lib
+          # Find php8embed.lib (import library for linking)
           $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($lib) {
             Copy-Item $lib.FullName sdk/lib/
             Write-Host "==> Found php8embed.lib at $($lib.FullName)"
           } else {
             Write-Error "php8embed.lib not found anywhere in build tree"
+            exit 1
+          }
+
+          # Find the runtime DLL — spc ZTS builds produce php8ts.dll (not php8embed.dll).
+          # The embed .lib links against php8ts.dll at runtime.
+          # Check for php8embed.dll first (windows.php.net style), fall back to php8ts.dll (spc style).
+          $dll = Get-ChildItem -Recurse -Filter "php8embed.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $dll) {
+            $dll = Get-ChildItem -Recurse -Filter "php8ts.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($dll) {
+            # Always ship as php8embed.dll — ephpm expects this name at build time
+            # (include_bytes! via PHP_EMBED_DLL_PATH) and runtime (delay-load).
+            Copy-Item $dll.FullName sdk/lib/php8embed.dll
+            Write-Host "==> Found runtime DLL at $($dll.FullName) -> sdk/lib/php8embed.dll"
+          } else {
+            Write-Error "No runtime DLL found (checked php8embed.dll and php8ts.dll)"
             exit 1
           }
 
