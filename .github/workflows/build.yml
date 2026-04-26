@@ -163,12 +163,31 @@ jobs:
           }
           Remove-Item -Force *.tar.gz -ErrorAction SilentlyContinue
 
-      - name: Add Git MinGW tools to PATH
+      - name: Install Git for Windows
         shell: powershell
-        # spc shells out to MinGW utilities (patch, etc.). The fork's spc.exe
-        # bundles its own micro PHP runtime, so no host PHP install is needed.
+        # Server Core has no git. spc needs:
+        # - git.exe: doctor's install-php-sdk auto-fix clones php-sdk-binary-tools
+        # - usr\bin\patch.exe: source patching during build
+        # Use PortableGit (self-extracting 7z) installed at the standard Git
+        # for Windows path so spc's expected layout matches.
         run: |
-          "C:\Program Files\Git\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+          $gitRoot = "C:\Program Files\Git"
+          if (-not (Test-Path "$gitRoot\cmd\git.exe")) {
+            $ver = "2.49.0"
+            $url = "https://github.com/git-for-windows/git/releases/download/v${ver}.windows.1/PortableGit-${ver}-64-bit.7z.exe"
+            Write-Host "Downloading PortableGit $ver..."
+            Invoke-WebRequest -Uri $url -OutFile portable-git.7z.exe
+            Write-Host "Extracting to $gitRoot..."
+            Start-Process -FilePath .\portable-git.7z.exe `
+              -ArgumentList @("-o`"$gitRoot`"", '-y') -Wait -NoNewWindow
+            Remove-Item portable-git.7z.exe
+            if (-not (Test-Path "$gitRoot\cmd\git.exe")) {
+              Write-Error "PortableGit extraction failed: $gitRoot\cmd\git.exe not found"
+              exit 1
+            }
+          }
+          "$gitRoot\cmd" | Out-File -Append -FilePath $env:GITHUB_PATH
+          "$gitRoot\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Install Visual Studio Build Tools
         shell: powershell
