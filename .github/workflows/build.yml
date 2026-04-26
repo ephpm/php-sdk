@@ -215,7 +215,7 @@ jobs:
             }
 
             if (-not (Test-Path $msbuild)) {
-              Write-Host "::error::VS install timed out after $timeoutMin min — $msbuild never appeared"
+              Write-Host "::error::VS install timed out after $timeoutMin min - $msbuild never appeared"
               Write-Host "==> Searching for MSBuild.exe anywhere on disk:"
               Get-ChildItem -Path C:\ -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue |
                 Select-Object -First 10 |
