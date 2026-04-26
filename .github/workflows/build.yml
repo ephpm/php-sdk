@@ -171,6 +171,47 @@ jobs:
         run: |
           "C:\Program Files\Git\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
 
+      - name: Install Visual Studio Build Tools
+        shell: powershell
+        # PHP requires MSVC to compile on Windows. The runner image is
+        # mcr.microsoft.com/windows/servercore:ltsc2025 with no compiler, so
+        # we install Build Tools per-job (~5-8 min). Long-term home is a
+        # dedicated php-sdk runner image; tracked for follow-up.
+        #
+        # Build Tools installs to ...\2022\BuildTools, but spc's hardcoded
+        # findVisualStudio() only checks Community/Professional/Enterprise.
+        # Junction BuildTools -> Community to satisfy the check without
+        # patching the fork.
+        run: |
+          $vsRoot = "C:\Program Files\Microsoft Visual Studio\2022"
+          $btPath = "$vsRoot\BuildTools"
+          $commPath = "$vsRoot\Community"
+
+          if (-not (Test-Path "$btPath\MSBuild\Current\Bin\MSBuild.exe")) {
+            Write-Host "Installing VS Build Tools 2022..."
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile vs_buildtools.exe
+            $proc = Start-Process -FilePath .\vs_buildtools.exe `
+              -ArgumentList @(
+                '--quiet', '--wait', '--norestart', '--nocache',
+                '--installPath', $btPath,
+                '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+                '--includeRecommended'
+              ) -Wait -PassThru -NoNewWindow
+            # 0 = ok, 3010 = ok+reboot-required (we don't reboot, ephemeral runner)
+            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+              Write-Error "VS Build Tools install failed with exit code $($proc.ExitCode)"
+              exit 1
+            }
+            Remove-Item vs_buildtools.exe
+          } else {
+            Write-Host "VS Build Tools already present at $btPath"
+          }
+
+          if (-not (Test-Path $commPath)) {
+            New-Item -ItemType Junction -Path $commPath -Target $btPath | Out-Null
+            Write-Host "Junction $commPath -> $btPath"
+          }
+
       - name: Download spc
         shell: powershell
         # Windows uses luthermonson/static-php-cli fork (2.8.5 + embed SAPI patches);
@@ -192,15 +233,9 @@ jobs:
 
       - name: Run spc doctor
         shell: powershell
-        # VS detection is skipped: spc only probes 6 hardcoded MSBuild paths
-        # under Community/Professional/Enterprise, false-negating runner
-        # images that ship VS Build Tools. Skipping it lets doctor proceed to
-        # the lower-priority checks whose --auto-fix is what we actually need:
-        # install-php-sdk (clones php-sdk-binary-tools, supplies 7za.exe for
-        # source extraction), install-nasm, install-perl. exit 0 keeps doctor
-        # advisory regardless.
-        env:
-          SPC_SKIP_DOCTOR_CHECK_ITEMS: "if Visual Studio are installed"
+        # --auto-fix runs install-php-sdk (clones php-sdk-binary-tools, needed
+        # for 7za.exe at extraction time), install-nasm, install-perl.
+        # Non-fatal in case any individual check has issues.
         run: |
           spc doctor --auto-fix
           exit 0
