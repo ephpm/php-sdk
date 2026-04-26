@@ -226,7 +226,8 @@ jobs:
                 Sort-Object LastWriteTime -Descending |
                 Select-Object -First 5 |
                 ForEach-Object {
-                  Write-Host "--- $($_.Name) ($([math]::Round($_.Length / 1KB))KB) ---"
+                  $kb = [math]::Round($_.Length / 1024)
+                  Write-Host "--- $($_.Name) (${kb}KB) ---"
                   Get-Content $_.FullName -Tail 80
                 }
               exit 1
