@@ -173,43 +173,77 @@ jobs:
 
       - name: Install Visual Studio Build Tools
         shell: powershell
-        # PHP requires MSVC to compile on Windows. The runner image is
-        # mcr.microsoft.com/windows/servercore:ltsc2025 with no compiler, so
-        # we install Build Tools per-job (~5-8 min). Long-term home is a
-        # dedicated php-sdk runner image; tracked for follow-up.
+        # PHP requires MSVC to compile on Windows. Runner image is
+        # mcr.microsoft.com/windows/servercore:ltsc2025 with no compiler.
+        # Install Build Tools per-job (~10-15 min). Long-term: dedicated
+        # php-sdk runner image with VS pre-baked.
         #
-        # Build Tools installs to ...\2022\BuildTools, but spc's hardcoded
-        # findVisualStudio() only checks Community/Professional/Enterprise.
-        # Junction BuildTools -> Community to satisfy the check without
-        # patching the fork.
+        # Install path: C:\BuildTools (Microsoft's recommended path for
+        # Server Core containers; nested Program Files paths are flaky).
+        # spc's findVisualStudio() probes Community/Professional/Enterprise
+        # under standard Program Files locations, so we junction one of
+        # those to C:\BuildTools after install.
+        #
+        # The bootstrapper (vs_buildtools.exe) exits before the underlying
+        # installer engine actually finishes on Server Core, so we poll
+        # for MSBuild.exe rather than trusting its exit code.
         run: |
-          $vsRoot = "C:\Program Files\Microsoft Visual Studio\2022"
-          $btPath = "$vsRoot\BuildTools"
-          $commPath = "$vsRoot\Community"
+          $installPath = "C:\BuildTools"
+          $msbuild = "$installPath\MSBuild\Current\Bin\MSBuild.exe"
+          $communityPath = "C:\Program Files\Microsoft Visual Studio\2022\Community"
 
-          if (-not (Test-Path "$btPath\MSBuild\Current\Bin\MSBuild.exe")) {
-            Write-Host "Installing VS Build Tools 2022..."
+          if (-not (Test-Path $msbuild)) {
+            Write-Host "Downloading VS Build Tools bootstrapper..."
             Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile vs_buildtools.exe
+
+            Write-Host "Launching install (bootstrapper may exit before install completes)..."
             $proc = Start-Process -FilePath .\vs_buildtools.exe `
               -ArgumentList @(
                 '--quiet', '--wait', '--norestart', '--nocache',
-                '--installPath', $btPath,
+                '--installPath', $installPath,
                 '--add', 'Microsoft.VisualStudio.Workload.VCTools',
                 '--includeRecommended'
               ) -Wait -PassThru -NoNewWindow
-            # 0 = ok, 3010 = ok+reboot-required (we don't reboot, ephemeral runner)
-            if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
-              Write-Error "VS Build Tools install failed with exit code $($proc.ExitCode)"
+            Write-Host "Bootstrapper exit code: $($proc.ExitCode)"
+            Remove-Item vs_buildtools.exe
+
+            # Poll for MSBuild.exe; bootstrapper exit is unreliable on Server Core
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $timeoutMin = 20
+            while (-not (Test-Path $msbuild) -and $sw.Elapsed.TotalMinutes -lt $timeoutMin) {
+              Start-Sleep -Seconds 30
+              Write-Host ("  ...waiting for VS install ({0:F0}s)" -f $sw.Elapsed.TotalSeconds)
+            }
+
+            if (-not (Test-Path $msbuild)) {
+              Write-Host "::error::VS install timed out after $timeoutMin min — $msbuild never appeared"
+              Write-Host "==> Searching for MSBuild.exe anywhere on disk:"
+              Get-ChildItem -Path C:\ -Recurse -Filter MSBuild.exe -ErrorAction SilentlyContinue |
+                Select-Object -First 10 |
+                ForEach-Object { Write-Host "  $($_.FullName)" }
+              Write-Host "==> Recent VS install logs in `$env:TEMP (dd_*.log):"
+              Get-ChildItem -Path $env:TEMP -Filter 'dd_*.log' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending |
+                Select-Object -First 5 |
+                ForEach-Object {
+                  Write-Host "--- $($_.Name) ($([math]::Round($_.Length / 1KB))KB) ---"
+                  Get-Content $_.FullName -Tail 80
+                }
               exit 1
             }
-            Remove-Item vs_buildtools.exe
+            Write-Host ("MSBuild.exe found after {0:F0}s" -f $sw.Elapsed.TotalSeconds)
           } else {
-            Write-Host "VS Build Tools already present at $btPath"
+            Write-Host "VS Build Tools already present at $installPath"
           }
 
-          if (-not (Test-Path $commPath)) {
-            New-Item -ItemType Junction -Path $commPath -Target $btPath | Out-Null
-            Write-Host "Junction $commPath -> $btPath"
+          # Junction the path spc's hardcoded check expects -> our install path
+          if (-not (Test-Path $communityPath)) {
+            $parent = Split-Path $communityPath -Parent
+            if (-not (Test-Path $parent)) {
+              New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            New-Item -ItemType Junction -Path $communityPath -Target $installPath | Out-Null
+            Write-Host "Junction $communityPath -> $installPath"
           }
 
       - name: Download spc
