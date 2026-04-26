@@ -192,7 +192,12 @@ jobs:
 
       - name: Run spc doctor
         shell: powershell
-        run: spc doctor --auto-fix; $true
+        # Diagnostic only. Doctor's VS detection probes vswhere.exe directly
+        # without running vcvarsall.bat, so it false-negatives on runners
+        # where the build itself works fine via phpsdk-VS17.bat. Non-fatal.
+        run: |
+          spc doctor --auto-fix
+          exit 0
 
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: powershell
