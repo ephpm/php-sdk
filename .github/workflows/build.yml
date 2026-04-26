@@ -192,9 +192,15 @@ jobs:
 
       - name: Run spc doctor
         shell: powershell
-        # Diagnostic only. Doctor's VS detection probes vswhere.exe directly
-        # without running vcvarsall.bat, so it false-negatives on runners
-        # where the build itself works fine via phpsdk-VS17.bat. Non-fatal.
+        # VS detection is skipped: spc only probes 6 hardcoded MSBuild paths
+        # under Community/Professional/Enterprise, false-negating runner
+        # images that ship VS Build Tools. Skipping it lets doctor proceed to
+        # the lower-priority checks whose --auto-fix is what we actually need:
+        # install-php-sdk (clones php-sdk-binary-tools, supplies 7za.exe for
+        # source extraction), install-nasm, install-perl. exit 0 keeps doctor
+        # advisory regardless.
+        env:
+          SPC_SKIP_DOCTOR_CHECK_ITEMS: "if Visual Studio are installed"
         run: |
           spc doctor --auto-fix
           exit 0
