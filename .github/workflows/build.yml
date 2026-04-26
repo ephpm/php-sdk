@@ -157,7 +157,7 @@ jobs:
       WIN_PHP_EXTENSIONS: "bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,hash,iconv,mbstring,mysqli,mysqlnd,openssl,pcre,pdo,pdo_mysql,phar,session,simplexml,sodium,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
     steps:
       - name: Clean up previous builds
-        shell: pwsh
+        shell: powershell
         run: |
           foreach ($dir in @('buildroot', 'source', 'downloads', 'sdk', 'php-sdk-binary-tools')) {
             if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
@@ -165,7 +165,7 @@ jobs:
           Remove-Item -Force *.tar.gz -ErrorAction SilentlyContinue
 
       - name: Install PHP (host toolchain for spc)
-        shell: pwsh
+        shell: powershell
         run: |
           if (Test-Path C:\php) { Remove-Item -Recurse -Force C:\php }
           Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/php-8.4.19-nts-Win32-vs17-x64.zip" -OutFile php.zip
@@ -175,7 +175,7 @@ jobs:
           "C:\Program Files\Git\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Download spc
-        shell: pwsh
+        shell: powershell
         # Windows uses luthermonson/static-php-cli fork (2.8.5 + embed SAPI patches);
         # upstream removed embed support in v3 and won't backport. Other platforms
         # still use upstream SPC_VERSION.
@@ -184,7 +184,7 @@ jobs:
           "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Download PHP sources
-        shell: pwsh
+        shell: powershell
         run: |
           spc download `
             --with-php=${{ inputs.php_version }} `
@@ -194,11 +194,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run spc doctor
-        shell: pwsh
+        shell: powershell
         run: spc doctor --auto-fix; $true
 
       - name: Build php8embed (patched spc with embed SAPI support)
-        shell: pwsh
+        shell: powershell
         run: |
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --build-embed `
@@ -207,7 +207,7 @@ jobs:
             --debug
 
       - name: Find build outputs
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host "==> Searching for php8embed files..."
           Get-ChildItem -Recurse -Filter "php8embed.*" | ForEach-Object { Write-Host $_.FullName }
@@ -217,7 +217,7 @@ jobs:
           Get-ChildItem -Recurse -Filter "libphp.*" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
       - name: Package SDK
-        shell: pwsh
+        shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
 
