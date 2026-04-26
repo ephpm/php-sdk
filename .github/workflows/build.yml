@@ -9,7 +9,7 @@ on:
         type: string
 
 env:
-  SPC_VERSION: "2.8.3"
+  SPC_VERSION: "2.8.5"
   PHP_EXTENSIONS: "bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,hash,iconv,mbstring,mysqli,mysqlnd,openssl,pcntl,pcre,pdo,pdo_mysql,phar,posix,session,simplexml,sodium,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
 
 jobs:
@@ -176,8 +176,11 @@ jobs:
 
       - name: Download spc
         shell: pwsh
+        # Windows uses luthermonson/static-php-cli fork (2.8.5 + embed SAPI patches);
+        # upstream removed embed support in v3 and won't backport. Other platforms
+        # still use upstream SPC_VERSION.
         run: |
-          Invoke-WebRequest -Uri "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
+          Invoke-WebRequest -Uri "https://github.com/luthermonson/static-php-cli/releases/download/2.8.5%2Bembed-windows/spc-windows-x64.exe" -OutFile spc.exe
           "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Download PHP sources
@@ -197,7 +200,7 @@ jobs:
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: pwsh
         run: |
-          C:\php\php.exe C:\spc-src\bin\spc build ${{ env.WIN_PHP_EXTENSIONS }} `
+          spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --build-embed `
             --enable-zts `
             --no-strip `
