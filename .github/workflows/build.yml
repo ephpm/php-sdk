@@ -164,14 +164,11 @@ jobs:
           }
           Remove-Item -Force *.tar.gz -ErrorAction SilentlyContinue
 
-      - name: Install PHP (host toolchain for spc)
+      - name: Add Git MinGW tools to PATH
         shell: powershell
+        # spc shells out to MinGW utilities (patch, etc.). The fork's spc.exe
+        # bundles its own micro PHP runtime, so no host PHP install is needed.
         run: |
-          if (Test-Path C:\php) { Remove-Item -Recurse -Force C:\php }
-          Invoke-WebRequest -Uri "https://windows.php.net/downloads/releases/php-8.4.19-nts-Win32-vs17-x64.zip" -OutFile php.zip
-          Expand-Archive -Path php.zip -DestinationPath C:\php
-          "C:\php" | Out-File -Append -FilePath $env:GITHUB_PATH
-          # spc needs Git MinGW tools (patch, etc.)
           "C:\Program Files\Git\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
 
       - name: Download spc
