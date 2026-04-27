@@ -91,29 +91,32 @@ jobs:
             runner: [self-hosted, macos, arm64]
             spc_arch: aarch64
     steps:
-      # spc is a PHP app — needs a host PHP CLI to run. This does NOT
-      # affect the PHP version being built (that's inputs.php_version).
-      - name: Set up PHP (host toolchain for spc)
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: "8.5"
-
-      - name: Install system dependencies
+      # spc on macOS is a self-contained micro-PHP binary (same as Windows
+      # spc.exe), so no host PHP install is needed. The runner image is bare,
+      # so we let `spc doctor --auto-fix` install Homebrew and the build deps
+      # it lists in MacOSToolCheckList::REQUIRED_COMMANDS (autoconf, automake,
+      # bison, cmake, flex, libtool, make, pkg-config, re2c, etc.).
+      - name: Download spc
         run: |
-          brew install autoconf automake bison cmake flex libtool \
-            make pkg-config re2c
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-macos-${{ matrix.spc_arch }}.tar.gz" \
+            | tar xz -C "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      # Use Homebrew LLVM instead of Apple clang — Apple clang crashes
-      # on PHP's JIT code (zend_jit_vm_helpers.c, exit code 70).
+      - name: Install Homebrew + build deps via spc doctor
+        # NONINTERACTIVE=1 is required so the Homebrew installer doesn't prompt
+        # for sudo confirmation (which would hang in CI).
+        env:
+          NONINTERACTIVE: "1"
+        run: spc doctor --auto-fix
+
+      # Apple clang crashes on PHP's JIT code (zend_jit_vm_helpers.c, exit 70),
+      # so use Homebrew LLVM instead. Doctor's REQUIRED_COMMANDS doesn't
+      # include llvm, so we install it explicitly after brew is up.
       - name: Install LLVM and prepend to PATH
         run: |
           brew install llvm
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-
-      - name: Download spc
-        run: |
-          curl -fsSL "https://github.com/crazywhalecc/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-macos-${{ matrix.spc_arch }}.tar.gz" \
-            | tar xz -C /usr/local/bin
 
       - name: Download PHP sources
         run: |
@@ -123,9 +126,6 @@ jobs:
             --prefer-pre-built
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run spc doctor
-        run: spc doctor --auto-fix || true
 
       - name: Build libphp.a
         run: |
