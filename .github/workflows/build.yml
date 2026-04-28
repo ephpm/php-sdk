@@ -133,6 +133,12 @@ jobs:
 
       - name: Build libphp.a
         run: |
+          # PHP < 8.4 uses K&R function declarations removed in C23.
+          # Homebrew LLVM/clang defaults to -std=gnu23, so force gnu17.
+          php_minor=$(echo "${{ inputs.php_version }}" | cut -d. -f2)
+          if [ "$php_minor" -lt 4 ]; then
+            export CFLAGS="-std=gnu17"
+          fi
           spc build ${{ env.PHP_EXTENSIONS }} \
             --build-embed \
             --enable-zts \
