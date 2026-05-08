@@ -71,7 +71,12 @@ jobs:
       - name: Package SDK
         run: |
           mkdir -p sdk/lib sdk/include
-          cp buildroot/lib/libphp.a sdk/lib/
+          # Ship every .a in buildroot/lib so consumers can link the support libs
+          # (libssl, libcrypto, libxml2, libz, etc.) that PHP extensions reference.
+          # ephpm's build.rs probes for libfoo.a in lib_dir and only emits -lfoo
+          # when the file exists, so this is additive — only the libs SPC
+          # actually built get linked.
+          cp buildroot/lib/*.a sdk/lib/
           cp -r buildroot/include/php sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz -C sdk .
 
@@ -148,7 +153,8 @@ jobs:
       - name: Package SDK
         run: |
           mkdir -p sdk/lib sdk/include
-          cp buildroot/lib/libphp.a sdk/lib/
+          # Ship every .a in buildroot/lib (see linux build for rationale).
+          cp buildroot/lib/*.a sdk/lib/
           cp -r buildroot/include/php sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
