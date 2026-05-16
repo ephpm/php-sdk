@@ -368,6 +368,28 @@ jobs:
 
           Copy-Item -Recurse buildroot/include/php sdk/include/php
 
+          # spc's Windows build (nmake-driven) doesn't install the
+          # platform-specific PHP win32 headers into buildroot the way
+          # autoconf's `make install-headers` does on Linux/macOS. The
+          # generated headers (e.g. Zend/zend_stream.h:80) still expect
+          # `#include "win32/ioutil.h"` relative to the main/ dir, so
+          # without these consumers fail with `fatal error: 'win32/
+          # ioutil.h' file not found` at the first compile. Stage them
+          # from the PHP source tree directly so the published tarball
+          # is self-contained.
+          $win32SrcDir = Get-ChildItem -Directory source -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path "$($_.FullName)/win32/ioutil.h" } |
+            Select-Object -First 1
+          if (-not $win32SrcDir) {
+            Write-Error "Could not find php-src/win32/ioutil.h under source/ — was the PHP source extracted?"
+            exit 1
+          }
+          $win32Dest = "sdk/include/php/main/win32"
+          New-Item -ItemType Directory -Force -Path $win32Dest | Out-Null
+          Copy-Item "$($win32SrcDir.FullName)/win32/*.h" $win32Dest
+          Write-Host "==> Staged win32 headers from $($win32SrcDir.FullName)/win32 -> $win32Dest"
+          Get-ChildItem $win32Dest | ForEach-Object { Write-Host "    $($_.Name)" }
+
           Write-Host "==> SDK contents:"
           Get-ChildItem -Recurse sdk/lib/
 
