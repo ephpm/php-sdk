@@ -171,13 +171,15 @@ jobs:
     name: Windows (x86_64)
     runs-on: [self-hosted, windows, x64]
     # Windows-specific extension set: PHP_EXTENSIONS minus the Unix-only
-    # entries (pcntl, posix, sysvmsg, sysvsem, sysvshm) and gettext.
-    # gettext is marked "Windows": "wip" in static-php-cli's ext.json — it has
-    # no Windows library builder, and its unconditional libiconv dependency
-    # trips spc with "library [libiconv] is in the lib.json list but not
-    # supported to compile". Re-add when spc gains Windows gettext support.
+    # entries (pcntl, posix, sysvmsg, sysvsem, sysvshm) and any extension
+    # static-php-cli marks "Windows": "wip" in config/ext.json without a
+    # Windows library builder:
+    #   - gettext  → no Windows library builder for gettext (libintl)
+    #   - gmp      → no Windows library builder for libgmp
+    #   - xsl      → no Windows library builder for libxslt
+    # Re-add each as spc grows Windows support for its underlying library.
     env:
-      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
     steps:
       - name: Clean up previous builds
         shell: powershell
