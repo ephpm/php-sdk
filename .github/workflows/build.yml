@@ -312,6 +312,10 @@ jobs:
           spc doctor --auto-fix
           exit 0
 
+      - name: Mark downloads as safe for git
+        shell: powershell
+        run: git config --global --add safe.directory '*'
+
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: powershell
         run: |
