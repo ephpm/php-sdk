@@ -42,7 +42,7 @@ jobs:
             -e PHP_VERSION="${{ inputs.php_version }}" \
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
             -v "$PWD/output:/output" \
-            alpine:3.20 sh -c '
+            docker.io/library/alpine:3.20 sh -c '
               set -eux
 
               apk add --no-cache \
