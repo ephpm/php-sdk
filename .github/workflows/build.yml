@@ -36,12 +36,11 @@ jobs:
 
       - name: Build inside Alpine container
         run: |
-          docker run --rm \
+          docker run --name spc-build \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
-            -v "$PWD/output:/output" \
             docker.io/library/alpine:3.20 sh -c '
               set -eux
 
@@ -69,11 +68,16 @@ jobs:
                 --enable-zts \
                 --no-strip \
                 --debug
-
-              mkdir -p /output/lib /output/include
-              cp buildroot/lib/*.a /output/lib/
-              cp -r buildroot/include/php /output/include/php
             '
+
+          # Volume mounts don't work in nested containerd - use docker cp
+          mkdir -p output/lib output/include
+          docker cp spc-build:/build/buildroot/lib/. output/lib/
+          docker cp spc-build:/build/buildroot/include/php output/include/php
+          docker rm spc-build
+          # Keep only static libraries
+          find output/lib -type f ! -name '*.a' -delete
+          find output/lib -type d -empty -delete
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
