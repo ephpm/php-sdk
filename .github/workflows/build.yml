@@ -10,7 +10,7 @@ on:
         type: string
 
 env:
-  SPC_VERSION: "v3.0.0-rc9"
+  SPC_VERSION: "v3.0.0-rc11"
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
@@ -32,55 +32,52 @@ jobs:
             spc_arch: aarch64
     steps:
       - name: Clean up previous builds
-        run: rm -rf buildroot source downloads sdk *.tar.gz
+        run: rm -rf output sdk *.tar.gz
 
-      - name: Install system dependencies
+      - name: Build inside Alpine container
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential autoconf automake bison \
-            cmake flex libtool make pkg-config re2c
+          docker run --rm \
+            -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            -e SPC_VERSION="${{ env.SPC_VERSION }}" \
+            -e PHP_VERSION="${{ inputs.php_version }}" \
+            -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
+            -v "$PWD/output:/output" \
+            alpine:3.20 sh -c '
+              set -eux
 
-      - name: Install cross-compilation tools (aarch64)
-        if: matrix.arch == 'aarch64'
-        run: sudo apt-get install -y -qq gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+              apk add --no-cache \
+                bash curl git build-base autoconf automake bison cmake flex \
+                libtool make pkgconf re2c linux-headers tar xz
 
-      - name: Download spc
-        run: |
-          mkdir -p "$HOME/bin"
-          curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-linux-${{ matrix.spc_arch }}.tar.gz" \
-            | tar xz -C "$HOME/bin"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
+              mkdir -p /usr/local/bin
+              curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
+                | tar xz -C /usr/local/bin
 
-      - name: Download PHP sources
-        run: |
-          spc download \
-            --with-php=${{ inputs.php_version }} \
-            --for-extensions=${{ env.PHP_EXTENSIONS }} \
-            --prefer-pre-built
+              mkdir /build && cd /build
+              spc download \
+                --with-php=${PHP_VERSION} \
+                --for-extensions=${PHP_EXTENSIONS} \
+                --prefer-pre-built
+
+              spc doctor --auto-fix || true
+
+              spc build ${PHP_EXTENSIONS} \
+                --build-embed \
+                --enable-zts \
+                --no-strip \
+                --debug
+
+              mkdir -p /output/lib /output/include
+              cp buildroot/lib/*.a /output/lib/
+              cp -r buildroot/include/php /output/include/php
+            '
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run spc doctor
-        run: spc doctor --auto-fix || true
-
-      - name: Build libphp.a
-        run: |
-          spc build ${{ env.PHP_EXTENSIONS }} \
-            --build-embed \
-            --enable-zts \
-            --no-strip \
-            --debug
-
       - name: Package SDK
         run: |
-          mkdir -p sdk/lib sdk/include
-          # Ship every .a in buildroot/lib so consumers can link the support libs
-          # (libssl, libcrypto, libxml2, libz, etc.) that PHP extensions reference.
-          # ephpm's build.rs probes for libfoo.a in lib_dir and only emits -lfoo
-          # when the file exists, so this is additive — only the libs SPC
-          # actually built get linked.
-          cp buildroot/lib/*.a sdk/lib/
-          cp -r buildroot/include/php sdk/include/php
+          mkdir -p sdk
+          cp -r output/* sdk/
           tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -307,10 +304,26 @@ jobs:
         shell: powershell
         # --auto-fix runs install-php-sdk (clones php-sdk-binary-tools, needed
         # for 7za.exe at extraction time), install-nasm, install-perl.
-        # Non-fatal in case any individual check has issues.
         run: |
           spc doctor --auto-fix
           exit 0
+
+      - name: Add Strawberry Perl to PATH
+        shell: powershell
+        # spc doctor installs Strawberry Perl into pkgroot but doesn't
+        # persist it in GITHUB_PATH. Git's perl is on PATH first and is
+        # missing modules openssl needs (Locale::Maketext::Simple).
+        # Prepend Strawberry Perl so it wins over Git's perl.
+        run: |
+          $perlDir = Get-ChildItem -Directory pkgroot -Recurse -Filter "strawberry-perl-*" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($perlDir -and (Test-Path "$($perlDir.FullName)\perl\bin\perl.exe")) {
+            $perlBin = "$($perlDir.FullName)\perl\bin"
+            Write-Host "Adding Strawberry Perl to PATH: $perlBin"
+            $perlBin | Out-File -Append -FilePath $env:GITHUB_PATH
+          } else {
+            Write-Host "::warning::Strawberry Perl not found in pkgroot — falling back to system perl"
+          }
 
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: powershell
