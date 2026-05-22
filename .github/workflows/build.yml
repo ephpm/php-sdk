@@ -332,6 +332,13 @@ jobs:
       - name: Build php8embed (patched spc with embed SAPI support)
         shell: powershell
         run: |
+          # Ensure Strawberry Perl precedes Git's perl in PATH for this step
+          $spDir = Get-ChildItem -Directory pkgroot -Recurse -Filter "strawberry-perl*" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($spDir -and (Test-Path "$($spDir.FullName)\perl\bin\perl.exe")) {
+            $env:PATH = "$($spDir.FullName)\perl\bin;$env:PATH"
+            Write-Host "Strawberry Perl active: $(& perl.exe -v 2>&1 | Select-String 'MSWin32|version')"
+          }
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --build-embed `
             --enable-zts `
