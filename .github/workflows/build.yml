@@ -315,14 +315,18 @@ jobs:
         # missing modules openssl needs (Locale::Maketext::Simple).
         # Prepend Strawberry Perl so it wins over Git's perl.
         run: |
-          $perlDir = Get-ChildItem -Directory pkgroot -Recurse -Filter "strawberry-perl-*" -ErrorAction SilentlyContinue |
+          Write-Host "Searching for Strawberry Perl in: $PWD"
+          Get-ChildItem -Directory -Recurse -Filter "strawberry-perl*" -ErrorAction SilentlyContinue |
+            Select-Object -First 5 | ForEach-Object { Write-Host "  Found dir: $($_.FullName)" }
+          $perlExe = Get-ChildItem -Recurse -Filter "perl.exe" -Path pkgroot -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "strawberry" } |
             Select-Object -First 1
-          if ($perlDir -and (Test-Path "$($perlDir.FullName)\perl\bin\perl.exe")) {
-            $perlBin = "$($perlDir.FullName)\perl\bin"
+          if ($perlExe) {
+            $perlBin = $perlExe.DirectoryName
             Write-Host "Adding Strawberry Perl to PATH: $perlBin"
             $perlBin | Out-File -Append -FilePath $env:GITHUB_PATH
           } else {
-            Write-Host "::warning::Strawberry Perl not found in pkgroot — falling back to system perl"
+            Write-Host "::warning::Strawberry Perl not found in pkgroot - falling back to system perl"
           }
 
       - name: Build php8embed (patched spc with embed SAPI support)
