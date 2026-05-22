@@ -49,6 +49,9 @@ jobs:
                 bash curl git build-base autoconf automake bison cmake flex \
                 libtool make pkgconf re2c linux-headers tar xz
 
+              # Use native gcc instead of zig-cc - Alpine already has musl
+              export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
+
               mkdir -p /usr/local/bin
               curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
                 | tar xz -C /usr/local/bin
