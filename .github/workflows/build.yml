@@ -10,7 +10,7 @@ on:
         type: string
 
 env:
-  SPC_VERSION: "v3.0.0-rc8"
+  SPC_VERSION: "v3.0.0-rc9"
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
