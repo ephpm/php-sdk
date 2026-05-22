@@ -215,6 +215,7 @@ jobs:
           }
           "$gitRoot\cmd" | Out-File -Append -FilePath $env:GITHUB_PATH
           "$gitRoot\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+          Remove-Item "$gitRoot\usr\bin\perl.exe" -ErrorAction SilentlyContinue
 
       - name: Install Visual Studio Build Tools
         shell: powershell
