@@ -68,16 +68,19 @@ jobs:
                 --enable-zts \
                 --no-strip \
                 --debug
+
+              # Package artifacts inside the container before exit -
+              # docker cp on stopped containers fails in nested containerd
+              find /build/buildroot/lib -type f ! -name "*.a" -delete
+              find /build/buildroot/lib -type d -empty -delete
+              tar cf /build/output.tar -C /build/buildroot lib include/php
             '
 
-          # Volume mounts don't work in nested containerd - use docker cp
-          mkdir -p output/lib output/include
-          docker cp spc-build:/build/buildroot/lib/. output/lib/
-          docker cp spc-build:/build/buildroot/include/php output/include/php
+          docker cp spc-build:/build/output.tar output.tar
           docker rm spc-build
-          # Keep only static libraries
-          find output/lib -type f ! -name '*.a' -delete
-          find output/lib -type d -empty -delete
+          mkdir -p output
+          tar xf output.tar -C output
+          rm output.tar
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
