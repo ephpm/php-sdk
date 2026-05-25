@@ -69,20 +69,21 @@ jobs:
                 --no-strip \
                 --debug
 
+              # Stage artifacts inside the container before it stops.
+              # tar -h dereferences symlinks (e.g. libcurses.a → libncurses.a).
+              mkdir -p /output/lib /output/include
+              tar ch -C /build/buildroot/lib . | tar x -C /output/lib
+              tar ch -C /build/buildroot/include php | tar x -C /output/include
+              find /output/lib -type f ! -name "*.a" -delete
+              find /output/lib -type d -empty -delete
+
             '
 
-          # Copy build artifacts out of the stopped container.
-          # Use tar --dereference so symlinks (e.g. libcurses.a → libncurses.a)
-          # are copied as regular files instead of dangling symlinks.
+          # Copy staged artifacts out of the stopped container
           mkdir -p output/lib output/include
-          docker start spc-build
-          docker exec spc-build tar ch -C /build/buildroot/lib . | tar x -C output/lib
-          docker exec spc-build tar ch -C /build/buildroot/include php | tar x -C output/include
-          docker stop spc-build
+          docker cp spc-build:/output/lib/. output/lib/
+          docker cp spc-build:/output/include/. output/include/
           docker rm spc-build
-          # Keep only static libraries
-          find output/lib -type f ! -name '*.a' -delete
-          find output/lib -type d -empty -delete
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
