@@ -10,7 +10,7 @@ on:
         type: string
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc13"
+  SPC_VERSION: "v3.0.0-pgo-rc14"
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
@@ -184,9 +184,11 @@ jobs:
     # entries (pcntl, posix, sysvmsg, sysvsem, sysvshm) and any extension
     # that won't build under static-php-cli's current Windows toolchain:
     #   - gmp → no static-libs@windows in v3 gmp.yml
+    #   - pgsql, pdo_pgsql → spc uses pre-built EnterpriseDB import lib
+    #     (links against LIBPQ.DLL) instead of a static build
     # Re-add as spc grows Windows support for its underlying library.
     env:
-      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
     steps:
       - name: Clean up previous builds
         shell: powershell
