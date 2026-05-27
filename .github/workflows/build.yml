@@ -385,7 +385,7 @@ jobs:
             exit 1
           }
 
-          # Find the runtime DLL — spc ZTS builds produce php8ts.dll (not php8embed.dll).
+          # Find the runtime DLL - spc ZTS builds produce php8ts.dll (not php8embed.dll).
           # The embed .lib links against php8ts.dll at runtime.
           # Check for php8embed.dll first (windows.php.net style), fall back to php8ts.dll (spc style).
           $dll = Get-ChildItem -Recurse -Filter "php8embed.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -393,7 +393,7 @@ jobs:
             $dll = Get-ChildItem -Recurse -Filter "php8ts.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
           }
           if ($dll) {
-            # Always ship as php8embed.dll — ephpm expects this name at build time
+            # Always ship as php8embed.dll - ephpm expects this name at build time
             # (include_bytes! via PHP_EMBED_DLL_PATH) and runtime (delay-load).
             Copy-Item $dll.FullName sdk/lib/php8embed.dll
             Write-Host "==> Found runtime DLL at $($dll.FullName) -> sdk/lib/php8embed.dll"
@@ -424,7 +424,7 @@ jobs:
             Where-Object { Test-Path "$($_.FullName)/win32/ioutil.h" } |
             Select-Object -First 1
           if (-not $win32SrcDir) {
-            Write-Error "Could not find php-src/win32/ioutil.h under source/ — was the PHP source extracted?"
+            Write-Error "Could not find php-src/win32/ioutil.h under source/ - was the PHP source extracted?"
             exit 1
           }
           $win32Dest = "sdk/include/php/main/win32"
