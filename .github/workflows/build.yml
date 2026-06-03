@@ -70,19 +70,23 @@ jobs:
                 --debug
 
               # Stage artifacts inside the container before it stops.
-              # tar -h dereferences symlinks (e.g. libcurses.a → libncurses.a).
-              # spc places install output one level deeper (buildroot/lib/lib,
-              # buildroot/include/include) — flatten by tarring from the inner
-              # directory when it exists.
+              # spc nests install output under buildroot/lib at varying
+              # depths (lib/lib/, sometimes deeper). Find .a files and the
+              # php header dir regardless of where they landed and copy them
+              # into a flat layout. cp -L dereferences symlinks
+              # (e.g. libcurses.a → libncurses.a).
               mkdir -p /output/lib /output/include
-              LIB_SRC=/build/buildroot/lib
-              [ -d "$LIB_SRC/lib" ] && LIB_SRC=$LIB_SRC/lib
-              tar ch -C "$LIB_SRC" . | tar x -C /output/lib
-              INC_SRC=/build/buildroot/include
-              [ -d "$INC_SRC/include" ] && INC_SRC=$INC_SRC/include
-              tar ch -C "$INC_SRC" php | tar x -C /output/include
-              find /output/lib -type f ! -name "*.a" -delete
-              find /output/lib -type d -empty -delete
+              echo "==> buildroot/lib structure (debug):"
+              find /build/buildroot/lib -maxdepth 4 -type d
+              echo "==> buildroot/include structure (debug):"
+              find /build/buildroot/include -maxdepth 4 -type d
+              find /build/buildroot/lib -name "*.a" -type f -exec cp -Lf {} /output/lib/ \;
+              PHP_INC_DIR=$(find /build/buildroot/include -name php -type d | head -n 1)
+              if [ -z "$PHP_INC_DIR" ]; then
+                echo "ERROR: no php header dir found under buildroot/include" >&2
+                exit 1
+              fi
+              cp -RLf "$PHP_INC_DIR" /output/include/php
 
             '
 
@@ -174,15 +178,18 @@ jobs:
         run: |
           mkdir -p sdk/lib sdk/include
           # Ship every .a in buildroot/lib (see linux build for rationale).
-          # spc places install output one level deeper (buildroot/lib/lib,
-          # buildroot/include/include) — flatten by sourcing from the inner
-          # directory when it exists.
-          LIB_SRC=buildroot/lib
-          [ -d "$LIB_SRC/lib" ] && LIB_SRC=$LIB_SRC/lib
-          cp "$LIB_SRC"/*.a sdk/lib/
-          INC_SRC=buildroot/include
-          [ -d "$INC_SRC/include" ] && INC_SRC=$INC_SRC/include
-          cp -r "$INC_SRC/php" sdk/include/php
+          # spc nests install output at varying depths; discover by find.
+          echo "==> buildroot/lib structure (debug):"
+          find buildroot/lib -maxdepth 4 -type d
+          echo "==> buildroot/include structure (debug):"
+          find buildroot/include -maxdepth 4 -type d
+          find buildroot/lib -name "*.a" -type f -exec cp -Lf {} sdk/lib/ \;
+          PHP_INC_DIR=$(find buildroot/include -name php -type d | head -n 1)
+          if [ -z "$PHP_INC_DIR" ]; then
+            echo "ERROR: no php header dir found under buildroot/include" >&2
+            exit 1
+          fi
+          cp -RLf "$PHP_INC_DIR" sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
