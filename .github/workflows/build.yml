@@ -71,9 +71,16 @@ jobs:
 
               # Stage artifacts inside the container before it stops.
               # tar -h dereferences symlinks (e.g. libcurses.a → libncurses.a).
+              # spc places install output one level deeper (buildroot/lib/lib,
+              # buildroot/include/include) — flatten by tarring from the inner
+              # directory when it exists.
               mkdir -p /output/lib /output/include
-              tar ch -C /build/buildroot/lib . | tar x -C /output/lib
-              tar ch -C /build/buildroot/include php | tar x -C /output/include
+              LIB_SRC=/build/buildroot/lib
+              [ -d "$LIB_SRC/lib" ] && LIB_SRC=$LIB_SRC/lib
+              tar ch -C "$LIB_SRC" . | tar x -C /output/lib
+              INC_SRC=/build/buildroot/include
+              [ -d "$INC_SRC/include" ] && INC_SRC=$INC_SRC/include
+              tar ch -C "$INC_SRC" php | tar x -C /output/include
               find /output/lib -type f ! -name "*.a" -delete
               find /output/lib -type d -empty -delete
 
@@ -167,8 +174,15 @@ jobs:
         run: |
           mkdir -p sdk/lib sdk/include
           # Ship every .a in buildroot/lib (see linux build for rationale).
-          cp buildroot/lib/*.a sdk/lib/
-          cp -r buildroot/include/php sdk/include/php
+          # spc places install output one level deeper (buildroot/lib/lib,
+          # buildroot/include/include) — flatten by sourcing from the inner
+          # directory when it exists.
+          LIB_SRC=buildroot/lib
+          [ -d "$LIB_SRC/lib" ] && LIB_SRC=$LIB_SRC/lib
+          cp "$LIB_SRC"/*.a sdk/lib/
+          INC_SRC=buildroot/include
+          [ -d "$INC_SRC/include" ] && INC_SRC=$INC_SRC/include
+          cp -r "$INC_SRC/php" sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
