@@ -90,10 +90,15 @@ jobs:
 
             '
 
-          # Copy staged artifacts out of the stopped container
-          mkdir -p output/lib output/include
-          docker cp spc-build:/output/lib/. output/lib/
-          docker cp spc-build:/output/include/. output/include/
+          # Copy staged artifacts out of the stopped container.
+          # `docker cp container:/output ./` copies /output as ./output (src
+          # dir → dest as src-named subdir). Avoid the `/.` "copy contents"
+          # form — it has been observed to leave the source dir nested
+          # inside the destination on some runner Docker versions, which
+          # ends up double-nested as ./lib/lib/*.a in the final tarball.
+          docker cp spc-build:/output ./
+          echo "==> output structure after docker cp (debug):"
+          find output -maxdepth 3 -type d
           docker rm spc-build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
