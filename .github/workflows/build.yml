@@ -56,10 +56,23 @@ jobs:
                 | tar xz -C /usr/local/bin
 
               mkdir /build && cd /build
-              spc download \
-                --with-php=${PHP_VERSION} \
-                --for-extensions=${PHP_EXTENSIONS} \
-                --prefer-pre-built
+              # Retry spc download to tolerate transient upstream flakes
+              # (gnu.org libiconv mirror, pecl.php.net, GitHub API rate
+              # limits). Up to 6 attempts with 2-3s jitter between (~15s).
+              i=0
+              until spc download \
+                  --with-php=${PHP_VERSION} \
+                  --for-extensions=${PHP_EXTENSIONS} \
+                  --prefer-pre-built; do
+                i=$((i + 1))
+                if [ "$i" -ge 6 ]; then
+                  echo "spc download failed after $i attempts" >&2
+                  exit 1
+                fi
+                s=$(awk "BEGIN{srand(); print 2+int(rand()*2)}")
+                echo "spc download flaked (attempt $i), retrying in ${s}s..."
+                sleep "$s"
+              done
 
               spc doctor --auto-fix || true
 
@@ -157,11 +170,22 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Download PHP sources
+        # Retry to tolerate transient upstream flakes (see linux build).
         run: |
-          spc download \
-            --with-php=${{ inputs.php_version }} \
-            --for-extensions=${{ env.PHP_EXTENSIONS }} \
-            --prefer-pre-built
+          i=0
+          until spc download \
+              --with-php=${{ inputs.php_version }} \
+              --for-extensions=${{ env.PHP_EXTENSIONS }} \
+              --prefer-pre-built; do
+            i=$((i + 1))
+            if [ "$i" -ge 6 ]; then
+              echo "spc download failed after $i attempts" >&2
+              exit 1
+            fi
+            s=$((RANDOM % 2 + 2))
+            echo "spc download flaked (attempt $i), retrying in ${s}s..."
+            sleep "$s"
+          done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -333,11 +357,23 @@ jobs:
 
       - name: Download PHP sources
         shell: powershell
+        # Retry to tolerate transient upstream flakes (see linux build).
         run: |
-          spc download `
-            --with-php=${{ inputs.php_version }} `
-            --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
-            --prefer-pre-built
+          $max = 6
+          for ($i = 1; $i -le $max; $i++) {
+            spc download `
+              --with-php=${{ inputs.php_version }} `
+              --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
+              --prefer-pre-built
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq $max) {
+              Write-Error "spc download failed after $max attempts"
+              exit 1
+            }
+            $s = Get-Random -Minimum 2 -Maximum 4
+            Write-Host "spc download flaked (attempt $i), retrying in ${s}s..."
+            Start-Sleep -Seconds $s
+          }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
