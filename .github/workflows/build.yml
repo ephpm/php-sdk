@@ -487,6 +487,30 @@ jobs:
           Write-Host "==> Staged win32 headers from $($win32SrcDir.FullName)/win32 -> $win32Dest"
           Get-ChildItem $win32Dest | ForEach-Object { Write-Host "    $($_.Name)" }
 
+          # main/php_streams.h:101 unconditionally
+          # `#include "streams/php_stream_context.h"` (plus several siblings
+          # for context/transport/filter/glob/mmap/userspace). On Linux and
+          # macOS, autoconf's `make install-headers` recursively installs
+          # main/streams/*.h alongside main/*.h. spc's Windows build (nmake)
+          # doesn't run install-headers, so the streams/ subdirectory never
+          # makes it into buildroot/include — the published tarball is
+          # missing the entire dir and consumers fail to compile the first
+          # translation unit that pulls in `main/php.h`. Stage the same way
+          # we stage win32/*.h: copy the .h files directly from the
+          # extracted php-src tree.
+          $streamsSrcDir = Get-ChildItem -Directory source -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path "$($_.FullName)/main/streams/php_stream_context.h" } |
+            Select-Object -First 1
+          if (-not $streamsSrcDir) {
+            Write-Error "Could not find php-src/main/streams/php_stream_context.h under source/ - was the PHP source extracted?"
+            exit 1
+          }
+          $streamsDest = "sdk/include/php/main/streams"
+          New-Item -ItemType Directory -Force -Path $streamsDest | Out-Null
+          Copy-Item "$($streamsSrcDir.FullName)/main/streams/*.h" $streamsDest
+          Write-Host "==> Staged streams headers from $($streamsSrcDir.FullName)/main/streams -> $streamsDest"
+          Get-ChildItem $streamsDest | ForEach-Object { Write-Host "    $($_.Name)" }
+
           Write-Host "==> SDK contents:"
           Get-ChildItem -Recurse sdk/lib/
 
