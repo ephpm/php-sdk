@@ -56,10 +56,23 @@ jobs:
                 | tar xz -C /usr/local/bin
 
               mkdir /build && cd /build
-              spc download \
-                --with-php=${PHP_VERSION} \
-                --for-extensions=${PHP_EXTENSIONS} \
-                --prefer-pre-built
+              # Retry spc download to tolerate transient upstream flakes
+              # (gnu.org libiconv mirror, pecl.php.net, GitHub API rate
+              # limits). Up to 6 attempts with 2-3s jitter between (~15s).
+              i=0
+              until spc download \
+                  --with-php=${PHP_VERSION} \
+                  --for-extensions=${PHP_EXTENSIONS} \
+                  --prefer-pre-built; do
+                i=$((i + 1))
+                if [ "$i" -ge 6 ]; then
+                  echo "spc download failed after $i attempts" >&2
+                  exit 1
+                fi
+                s=$(awk "BEGIN{srand(); print 2+int(rand()*2)}")
+                echo "spc download flaked (attempt $i), retrying in ${s}s..."
+                sleep "$s"
+              done
 
               spc doctor --auto-fix || true
 
@@ -70,10 +83,19 @@ jobs:
                 --debug
 
               # Stage artifacts inside the container before it stops.
-              # tar -h dereferences symlinks (e.g. libcurses.a → libncurses.a).
+              # spc nests install output under buildroot/lib at varying
+              # depths (lib/lib/, sometimes deeper). Find .a files and the
+              # php header dir wherever they landed and copy them into a
+              # flat layout. cp -L dereferences symlinks
+              # (e.g. libcurses.a → libncurses.a).
               mkdir -p /output/lib /output/include
-              tar ch -C /build/buildroot/lib . | tar x -C /output/lib
-              tar ch -C /build/buildroot/include php | tar x -C /output/include
+              find /build/buildroot/lib -name "*.a" -type f -exec cp -Lf {} /output/lib/ \;
+              PHP_INC_DIR=$(find /build/buildroot/include -name php -type d | head -n 1)
+              if [ -z "$PHP_INC_DIR" ]; then
+                echo "ERROR: no php header dir found under buildroot/include" >&2
+                exit 1
+              fi
+              cp -RLf "$PHP_INC_DIR" /output/include/php
 
               # Bundle the musl-built libstdc++.a so downstream consumers
               # can link against the same C++ runtime spc used to compile
@@ -92,15 +114,15 @@ jobs:
                 exit 1
               fi
 
-              find /output/lib -type f ! -name "*.a" -delete
-              find /output/lib -type d -empty -delete
-
             '
 
-          # Copy staged artifacts out of the stopped container
-          mkdir -p output/lib output/include
-          docker cp spc-build:/output/lib/. output/lib/
-          docker cp spc-build:/output/include/. output/include/
+          # Copy staged artifacts out of the stopped container.
+          # `docker cp container:/output ./` copies /output as ./output (src
+          # dir → dest as src-named subdir). Avoid the `/.` "copy contents"
+          # form — observed to leave the source dir nested inside the
+          # destination on some runner Docker versions, producing
+          # ./lib/lib/*.a in the final tarball.
+          docker cp spc-build:/output ./
           docker rm spc-build
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -159,11 +181,22 @@ jobs:
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Download PHP sources
+        # Retry to tolerate transient upstream flakes (see linux build).
         run: |
-          spc download \
-            --with-php=${{ inputs.php_version }} \
-            --for-extensions=${{ env.PHP_EXTENSIONS }} \
-            --prefer-pre-built
+          i=0
+          until spc download \
+              --with-php=${{ inputs.php_version }} \
+              --for-extensions=${{ env.PHP_EXTENSIONS }} \
+              --prefer-pre-built; do
+            i=$((i + 1))
+            if [ "$i" -ge 6 ]; then
+              echo "spc download failed after $i attempts" >&2
+              exit 1
+            fi
+            s=$((RANDOM % 2 + 2))
+            echo "spc download flaked (attempt $i), retrying in ${s}s..."
+            sleep "$s"
+          done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -184,9 +217,15 @@ jobs:
       - name: Package SDK
         run: |
           mkdir -p sdk/lib sdk/include
-          # Ship every .a in buildroot/lib (see linux build for rationale).
-          cp buildroot/lib/*.a sdk/lib/
-          cp -r buildroot/include/php sdk/include/php
+          # spc nests install output at varying depths; discover by find
+          # (see linux build for rationale).
+          find buildroot/lib -name "*.a" -type f -exec cp -Lf {} sdk/lib/ \;
+          PHP_INC_DIR=$(find buildroot/include -name php -type d | head -n 1)
+          if [ -z "$PHP_INC_DIR" ]; then
+            echo "ERROR: no php header dir found under buildroot/include" >&2
+            exit 1
+          fi
+          cp -RLf "$PHP_INC_DIR" sdk/include/php
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -325,11 +364,23 @@ jobs:
 
       - name: Download PHP sources
         shell: powershell
+        # Retry to tolerate transient upstream flakes (see linux build).
         run: |
-          spc download `
-            --with-php=${{ inputs.php_version }} `
-            --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
-            --prefer-pre-built
+          $max = 6
+          for ($i = 1; $i -le $max; $i++) {
+            spc download `
+              --with-php=${{ inputs.php_version }} `
+              --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
+              --prefer-pre-built
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq $max) {
+              Write-Error "spc download failed after $max attempts"
+              exit 1
+            }
+            $s = Get-Random -Minimum 2 -Maximum 4
+            Write-Host "spc download flaked (attempt $i), retrying in ${s}s..."
+            Start-Sleep -Seconds $s
+          }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
