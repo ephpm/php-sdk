@@ -74,6 +74,24 @@ jobs:
               mkdir -p /output/lib /output/include
               tar ch -C /build/buildroot/lib . | tar x -C /output/lib
               tar ch -C /build/buildroot/include php | tar x -C /output/include
+
+              # Bundle the musl-built libstdc++.a so downstream consumers
+              # can link against the same C++ runtime spc used to compile
+              # libicu*, libxml2, etc. PHPs intl extension references C++
+              # symbols (std::__throw_bad_alloc, __cxa_begin_catch, ICU
+              # UnicodeString ctors, ...). Ubuntu/Debian build hosts have
+              # a glibc-flavored libstdc++ that is ABI-incompatible with
+              # musl PHP — without bundling this, downstream binaries
+              # either fail to link or silently mismix C++ runtimes.
+              libstdcxx_path=$(c++ -print-file-name=libstdc++.a)
+              if [ -f "$libstdcxx_path" ]; then
+                cp "$libstdcxx_path" /output/lib/
+                echo "==> Staged libstdc++.a from $libstdcxx_path"
+              else
+                echo "::error::libstdc++.a not found (c++ -print-file-name returned: $libstdcxx_path)"
+                exit 1
+              fi
+
               find /output/lib -type f ! -name "*.a" -delete
               find /output/lib -type d -empty -delete
 
