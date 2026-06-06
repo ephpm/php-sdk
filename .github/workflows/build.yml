@@ -71,8 +71,22 @@ jobs:
 
               # Stage artifacts inside the container before it stops.
               # tar -h dereferences symlinks (e.g. libcurses.a → libncurses.a).
+              #
+              # spc on Linux with --build-embed --enable-zts puts the
+              # final libphp.a and supporting static libs one directory
+              # too deep: /build/buildroot/lib/lib/*.a instead of
+              # /build/buildroot/lib/*.a. macOS and Windows builds land
+              # flat. Detect the nested layout and tar from the deeper
+              # directory so the published tarball is consistent across
+              # platforms (and ephpm-php's build.rs can probe `.../lib/`
+              # for libphp.a uniformly).
               mkdir -p /output/lib /output/include
-              tar ch -C /build/buildroot/lib . | tar x -C /output/lib
+              SRC=/build/buildroot/lib
+              if [ -d "$SRC/lib" ] && ls "$SRC/lib"/*.a >/dev/null 2>&1; then
+                echo "==> Detected nested layout, flattening from $SRC/lib"
+                SRC="$SRC/lib"
+              fi
+              tar ch -C "$SRC" . | tar x -C /output/lib
               tar ch -C /build/buildroot/include php | tar x -C /output/include
 
               # Bundle the musl-built libstdc++.a so downstream consumers
