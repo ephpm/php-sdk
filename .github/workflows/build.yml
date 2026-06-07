@@ -554,6 +554,58 @@ jobs:
           Write-Host "==> Staged streams headers from $($streamsSrcDir.FullName)/main/streams -> $streamsDest"
           Get-ChildItem $streamsDest | ForEach-Object { Write-Host "    $($_.Name)" }
 
+          # PHP source uses capital-letter filenames for some Windows SDK
+          # headers (Ws2tcpip.h, etc.) which is fine on native MSVC builds
+          # — Windows' file system is case-insensitive, MSVC's include
+          # resolver case-folds — but breaks Linux cross-compilers using
+          # xwin (case-sensitive filesystem + clang-cl's quoted-include
+          # lookup does not case-fold). Rewrite the references in the
+          # staged headers to lowercase. Idempotent. Should be paired
+          # with an upstream php-src fix that lowercases these at source;
+          # this stays as belt-and-suspenders regardless.
+          Write-Host "==> Lowercasing capital Windows SDK header references in staged PHP headers"
+          $winSdkHeaderMap = @{
+            # Currently present in our staged SDK:
+            'Ws2tcpip.h'  = 'ws2tcpip.h'   # main/streams/php_stream_transport.h
+            # Future-proofing: not currently referenced by any header we
+            # stage, but if PHP starts pulling them into a header we ship
+            # (e.g. via a new extension's public header) we want the same
+            # rewrite to apply automatically.
+            'Mswsock.h'   = 'mswsock.h'
+            'Iphlpapi.h'  = 'iphlpapi.h'
+            'IPHlpApi.h'  = 'iphlpapi.h'
+            'Mstcpip.h'   = 'mstcpip.h'
+            'Wincrypt.h'  = 'wincrypt.h'
+            'Winsock2.h'  = 'winsock2.h'
+          }
+          $files = Get-ChildItem -Recurse -Path "sdk/include/php" -Filter "*.h"
+          foreach ($file in $files) {
+            $content = Get-Content -Raw $file.FullName
+            $modified = $false
+            foreach ($pair in $winSdkHeaderMap.GetEnumerator()) {
+              # Match `#include "X"` or `#include <X>` literally —
+              # comments / strings that mention the name are left alone.
+              $patterns = @(
+                ('#include "{0}"' -f [regex]::Escape($pair.Key)),
+                ('#include <{0}>' -f [regex]::Escape($pair.Key))
+              )
+              $replacements = @(
+                ('#include "{0}"' -f $pair.Value),
+                ('#include <{0}>' -f $pair.Value)
+              )
+              for ($i = 0; $i -lt $patterns.Count; $i++) {
+                if ($content -cmatch $patterns[$i]) {
+                  $content = $content -creplace $patterns[$i], $replacements[$i]
+                  $modified = $true
+                }
+              }
+            }
+            if ($modified) {
+              Set-Content -NoNewline -Path $file.FullName -Value $content
+              Write-Host "    rewrote $($file.FullName)"
+            }
+          }
+
           Write-Host "==> SDK contents:"
           Get-ChildItem -Recurse sdk/lib/
 
