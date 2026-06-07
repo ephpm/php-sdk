@@ -8,6 +8,19 @@ on:
         description: "PHP version to build (e.g. 8.5.2, 8.4.7, 8.3.20)"
         required: true
         type: string
+      platform:
+        description: "Which platform(s) to build. Partial builds upload the
+          new tarball to the existing release; tarballs for unbuilt
+          platforms stay put."
+        required: false
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-x86_64
+          - linux-aarch64
+          - macos-aarch64
+          - windows-x86_64
 
 env:
   SPC_VERSION: "v3.0.0-pgo-rc15"
@@ -17,19 +30,46 @@ env:
   PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 jobs:
+  # Compute which jobs / matrix entries actually run based on the `platform`
+  # input. Each build job below reads from these outputs so we can target a
+  # single OS/arch (or all of them) from one workflow_dispatch invocation.
+  # Empty matrices => the job's matrix expands to zero runs and is skipped.
+  setup:
+    name: Setup (resolve target platforms)
+    runs-on: ubuntu-latest
+    outputs:
+      linux-matrix: ${{ steps.compute.outputs.linux-matrix }}
+      build-macos: ${{ steps.compute.outputs.build-macos }}
+      build-windows: ${{ steps.compute.outputs.build-windows }}
+    steps:
+      - id: compute
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          linux_all='[{"arch":"x86_64","runner":["self-hosted","linux","x64"],"spc_arch":"x86_64"},{"arch":"aarch64","runner":["self-hosted","linux","arm64"],"spc_arch":"aarch64"}]'
+          linux_x64='[{"arch":"x86_64","runner":["self-hosted","linux","x64"],"spc_arch":"x86_64"}]'
+          linux_arm='[{"arch":"aarch64","runner":["self-hosted","linux","arm64"],"spc_arch":"aarch64"}]'
+          case "$PLATFORM" in
+            all)              lm=$linux_all; mac=true;  win=true ;;
+            linux-x86_64)     lm=$linux_x64; mac=false; win=false ;;
+            linux-aarch64)    lm=$linux_arm; mac=false; win=false ;;
+            macos-aarch64)    lm='[]';       mac=true;  win=false ;;
+            windows-x86_64)   lm='[]';       mac=false; win=true ;;
+            *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
+          esac
+          echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
+          echo "build-macos=$mac" >> "$GITHUB_OUTPUT"
+          echo "build-windows=$win" >> "$GITHUB_OUTPUT"
+
   build-linux:
     name: Linux (${{ matrix.arch }})
+    needs: setup
+    if: needs.setup.outputs.linux-matrix != '[]'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: x86_64
-            runner: [self-hosted, linux, x64]
-            spc_arch: x86_64
-          - arch: aarch64
-            runner: [self-hosted, linux, arm64]
-            spc_arch: aarch64
+        include: ${{ fromJSON(needs.setup.outputs.linux-matrix) }}
     steps:
       - name: Clean up previous builds
         run: rm -rf output sdk *.tar.gz
@@ -141,6 +181,8 @@ jobs:
 
   build-macos:
     name: macOS (${{ matrix.arch }})
+    needs: setup
+    if: needs.setup.outputs.build-macos == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -236,6 +278,8 @@ jobs:
 
   build-windows:
     name: Windows (x86_64)
+    needs: setup
+    if: needs.setup.outputs.build-windows == 'true'
     runs-on: [self-hosted, windows, x64]
     # Windows-specific extension set: PHP_EXTENSIONS minus the Unix-only
     # entries (pcntl, posix, sysvmsg, sysvsem, sysvshm) and any extension
@@ -524,6 +568,13 @@ jobs:
   release:
     name: Create Release
     needs: [build-linux, build-macos, build-windows]
+    # Partial rebuilds skip the un-targeted build jobs (skipped != failure),
+    # but a real failure should still abort the release.
+    if: |
+      always()
+      && needs.build-linux.result   != 'failure'
+      && needs.build-macos.result   != 'failure'
+      && needs.build-windows.result != 'failure'
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
@@ -534,10 +585,13 @@ jobs:
           merge-multiple: true
 
       - name: List artifacts
-        run: ls -lh artifacts/
+        run: ls -lh artifacts/ || { echo "::error::no artifacts produced"; exit 1; }
 
       - name: Create release
         uses: softprops/action-gh-release@v2
+        # action-gh-release replaces only assets whose filenames match what
+        # we upload. Tarballs for platforms we didn't rebuild stay attached
+        # to the existing release tag untouched.
         with:
           tag_name: v${{ inputs.php_version }}
           name: PHP ${{ inputs.php_version }}
