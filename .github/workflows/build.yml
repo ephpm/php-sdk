@@ -554,6 +554,34 @@ jobs:
           Write-Host "==> Staged streams headers from $($streamsSrcDir.FullName)/main/streams -> $streamsDest"
           Get-ChildItem $streamsDest | ForEach-Object { Write-Host "    $($_.Name)" }
 
+          # nmake install-headers on Windows doesn't recurse into ext/*
+          # subdirectories. PHP's own headers cross-reference each other
+          # with `#include "ext/standard/php_var.h"` from
+          # ext/session/php_session.h (and several others), so the entire
+          # ext/*/ header trees must be in the SDK tarball or downstream
+          # compiles fail at the first translation unit that pulls in an
+          # extension header.
+          #
+          # Recursive-by-default rather than per-subdir explicit list: we
+          # don't know in advance which ext/<name>/ headers each PHP
+          # release cross-references, and shipping more headers is cheap.
+          # Mirrors the main/streams/ pattern above.
+          $extSrcRoot = "$($streamsSrcDir.FullName)/ext"
+          if (-not (Test-Path "$extSrcRoot/standard/php_var.h")) {
+            Write-Error "Could not find php-src/ext/standard/php_var.h under $extSrcRoot"
+            exit 1
+          }
+          $extDest = "sdk/include/php/ext"
+          Get-ChildItem -Path $extSrcRoot -Recurse -Filter "*.h" |
+            ForEach-Object {
+              $rel = $_.FullName.Substring($extSrcRoot.Length).TrimStart('\','/')
+              $dest = Join-Path $extDest $rel
+              New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+              Copy-Item $_.FullName $dest
+            }
+          $extHeaderCount = (Get-ChildItem -Path $extDest -Recurse -Filter "*.h").Count
+          Write-Host "==> Staged $extHeaderCount ext/*/*.h headers from $extSrcRoot -> $extDest"
+
           Write-Host "==> SDK contents:"
           Get-ChildItem -Recurse sdk/lib/
 
