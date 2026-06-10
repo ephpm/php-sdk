@@ -171,6 +171,20 @@ jobs:
         run: |
           mkdir -p sdk
           cp -r output/* sdk/
+
+          # Guard: the staged headers must be the PHP version this run was
+          # asked to build. spc has silently fallen back to "latest stable"
+          # before (--with-php=8.4.21 produced a PHP 8.5.7 tree, shipped as
+          # v8.4.21, and was only caught days later by ephpm's E2E version
+          # assertion). Fail here, loudly, instead of publishing a
+          # mislabeled SDK.
+          staged=$(sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' sdk/include/php/main/php_version.h)
+          if [ "$staged" != "${{ inputs.php_version }}" ]; then
+            echo "::error::staged PHP is '${staged}' but this build was asked for '${{ inputs.php_version }}' - spc ignored --with-php"
+            exit 1
+          fi
+          echo "==> Version guard OK: staged PHP ${staged}"
+
           tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -268,6 +282,16 @@ jobs:
             exit 1
           fi
           cp -RLf "$PHP_INC_DIR" sdk/include/php
+
+          # Guard: staged headers must match the requested version (see the
+          # linux Package SDK step for the incident this prevents).
+          staged=$(sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' sdk/include/php/main/php_version.h)
+          if [ "$staged" != "${{ inputs.php_version }}" ]; then
+            echo "::error::staged PHP is '${staged}' but this build was asked for '${{ inputs.php_version }}' - spc ignored --with-php"
+            exit 1
+          fi
+          echo "==> Version guard OK: staged PHP ${staged}"
+
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -538,7 +562,7 @@ jobs:
           # alongside main/*.h. spc's Windows build (nmake) doesn't run
           # install-headers, so the streams/ subdirectory never makes it
           # into buildroot/include and the published tarball ships without
-          # it — consumers fail to compile the first translation unit that
+          # it - consumers fail to compile the first translation unit that
           # pulls in main/php.h. Stage the same way we stage win32/*.h:
           # copy the .h files directly from the extracted php-src tree.
           $streamsSrcDir = Get-ChildItem -Directory source -ErrorAction SilentlyContinue |
@@ -584,6 +608,21 @@ jobs:
 
           Write-Host "==> SDK contents:"
           Get-ChildItem -Recurse sdk/lib/
+
+          # Guard: staged headers must match the requested version (see the
+          # linux Package SDK step for the incident this prevents).
+          $versionHeader = "sdk/include/php/main/php_version.h"
+          $match = Select-String -Path $versionHeader -Pattern '#define PHP_VERSION "([^"]+)"'
+          if (-not $match) {
+            Write-Error "Could not read PHP_VERSION from $versionHeader"
+            exit 1
+          }
+          $staged = $match.Matches[0].Groups[1].Value
+          if ($staged -ne "${{ inputs.php_version }}") {
+            Write-Error "staged PHP is '$staged' but this build was asked for '${{ inputs.php_version }}' - spc ignored --with-php"
+            exit 1
+          }
+          Write-Host "==> Version guard OK: staged PHP $staged"
 
           tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz -C sdk .
 
