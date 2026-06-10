@@ -118,10 +118,12 @@ jobs:
 
               # --dl-with-php pins the build-phase artifact downloader to the
               # requested version. Without it, spc build re-checks php-src
-              # against its --dl-with-php DEFAULT ("8.5"), decides the cached
-              # 8.4.x/8.3.x source "doesn't match", silently re-downloads
+              # against the dl-with-php DEFAULT (8.5), treats the cached
+              # 8.4.x/8.3.x source as a mismatch, silently re-downloads
               # latest 8.5.x, and builds the wrong PHP (shipped mislabeled
               # tarballs until the version guard below caught it).
+              # NOTE: this comment lives inside a single-quoted sh -c
+              # block; apostrophes here would terminate the string.
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${PHP_VERSION} \
                 --build-embed \
