@@ -116,7 +116,14 @@ jobs:
 
               spc doctor --auto-fix || true
 
+              # --dl-with-php pins the build-phase artifact downloader to the
+              # requested version. Without it, spc build re-checks php-src
+              # against its --dl-with-php DEFAULT ("8.5"), decides the cached
+              # 8.4.x/8.3.x source "doesn't match", silently re-downloads
+              # latest 8.5.x, and builds the wrong PHP (shipped mislabeled
+              # tarballs until the version guard below caught it).
               spc build ${PHP_EXTENSIONS} \
+                --dl-with-php=${PHP_VERSION} \
                 --build-embed \
                 --enable-zts \
                 --no-strip \
@@ -264,7 +271,10 @@ jobs:
           if [ "$php_minor" -lt 4 ]; then
             export CFLAGS="-std=gnu17"
           fi
+          # --dl-with-php pins the build-phase downloader to the requested
+          # version (see linux build for the incident this prevents).
           spc build ${{ env.PHP_EXTENSIONS }} \
+            --dl-with-php=${{ inputs.php_version }} \
             --build-embed \
             --enable-zts \
             --no-strip \
@@ -491,7 +501,10 @@ jobs:
             $env:PATH = "$($spDir.FullName)\perl\bin;$env:PATH"
             Write-Host "Strawberry Perl active: $(& perl.exe -v 2>&1 | Select-String 'MSWin32|version')"
           }
+          # --dl-with-php pins the build-phase downloader to the requested
+          # version (see linux build for the incident this prevents).
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
+            --dl-with-php=${{ inputs.php_version }} `
             --build-embed `
             --enable-zts `
             --no-strip `
