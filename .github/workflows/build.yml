@@ -527,7 +527,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
 
-          # Find php8embed.lib (fat static library containing all PHP objects)
+          # Find php8embed.lib (the embed SAPI static library)
           $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($lib) {
             Copy-Item $lib.FullName sdk/lib/
@@ -537,14 +537,45 @@ jobs:
             exit 1
           }
 
-          # Copy any DLLs if present (not expected for spc static builds)
-          foreach ($name in @("php8embed.dll", "php8ts.dll")) {
-            $dll = Get-ChildItem -Recurse -Filter $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($dll) {
-              Copy-Item $dll.FullName sdk/lib/
-              Write-Host "==> Found $name at $($dll.FullName)"
-            }
+          # Ship php8embed.lib's static dependency libraries too. spc's
+          # --build-embed is a static build: php8embed.lib carries PHP's
+          # own objects, but the third-party deps it was compiled against
+          # (openssl/libcrypto, zlib, libxml2, ICU, oniguruma, sqlite3, ...)
+          # live as separate .lib files under spc's buildroot. ephpm links
+          # the embed lib STATICALLY (like libphp.a on Linux/macOS), so those
+          # dep libs must be in the tarball or the final MSVC link fails with
+          # unresolved externals. The Linux/macOS Package SDK steps already
+          # copy every *.a from buildroot/lib for the same reason; do the
+          # equivalent here.
+          #
+          # Sources, in priority order: every buildroot*/lib directory spc
+          # produced, plus any .lib sitting alongside php8embed.lib. We do NOT
+          # do a tree-wide *.lib copy -- that would sweep in MSVC/Windows-SDK
+          # import libs. Scope to spc's own output dirs only.
+          $depDirs = @()
+          Get-ChildItem -Recurse -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "lib" -and $_.Parent.Name -like "buildroot*" } |
+            ForEach-Object { $depDirs += $_.FullName }
+          $depDirs += (Split-Path $lib.FullName -Parent)
+          $depDirs = $depDirs | Select-Object -Unique
+          $copied = 0
+          foreach ($dir in $depDirs) {
+            Get-ChildItem -Path $dir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Copy-Item $_.FullName sdk/lib/ -Force
+                $copied++
+              }
           }
+          Write-Host "==> Staged $copied .lib file(s) from spc buildroot dirs: $($depDirs -join ', ')"
+
+          # Diagnostic: full inventory of every .lib spc produced anywhere in
+          # the tree (path + size). If the downstream static link still hits
+          # unresolved externals, this log pinpoints which lib provides the
+          # missing symbols and whether it shipped.
+          Write-Host "==> Full .lib inventory in build tree:"
+          Get-ChildItem -Recurse -Filter "*.lib" -File -ErrorAction SilentlyContinue |
+            Sort-Object FullName |
+            ForEach-Object { Write-Host ("    {0,12:N0}  {1}" -f $_.Length, $_.FullName) }
 
           Copy-Item -Recurse buildroot/include/php sdk/include/php
 
