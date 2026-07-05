@@ -27,7 +27,13 @@ env:
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
-  PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+  #
+  # NOTE on mbregex: spc builds mbstring with --disable-mbregex UNLESS the
+  # separate `mbregex` extension is also requested (it pulls in oniguruma).
+  # Without it, mb_split()/mb_ereg*() are undefined — which breaks Laravel's
+  # Str::studly() and any framework using the mbstring regex functions. Keep
+  # `mbregex` in BOTH lists alongside `mbstring`.
+  PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 jobs:
   # Compute which jobs / matrix entries actually run based on the `platform`
@@ -325,7 +331,7 @@ jobs:
     #     (links against LIBPQ.DLL) instead of a static build
     # Re-add as spc grows Windows support for its underlying library.
     env:
-      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
     steps:
       - name: Clean up previous builds
         shell: powershell
