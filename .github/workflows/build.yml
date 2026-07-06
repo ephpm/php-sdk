@@ -151,13 +151,27 @@ jobs:
               # "php-sources"): the runner fleet's egress to php.net is
               # unreliable (release-info API refused every attempt on
               # 2026-07-06 while GitHub worked throughout), and pinned
-              # tarballs also make builds deterministic. Refresh the mirror
-              # when bumping pinned PHP versions.
+              # tarballs also make builds deterministic. Pre-fetch with plain
+              # curl (the same mechanism that fetches spc itself, proven on
+              # the fleet) and hand spc a file:// URL — spc's own HTTP client
+              # failed on the release-asset redirect from the runner (curl
+              # exit 22, run 28761831602) while plain curl succeeds. Refresh
+              # the mirror when bumping pinned PHP versions.
+              j=0
+              until curl -fsSL -o /tmp/php-src-mirror.tar.gz \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"; do
+                j=$((j + 1))
+                if [ "$j" -ge 5 ]; then
+                  echo "mirror fetch failed after $j attempts" >&2
+                  exit 1
+                fi
+                sleep 3
+              done
               i=0
               until spc download \
                   --with-php=${PHP_VERSION} \
                   --for-extensions=${PHP_EXTENSIONS} \
-                  --custom-url="php-src:https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz" \
+                  --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
                   --prefer-pre-built; do
                 i=$((i + 1))
                 if [ "$i" -ge 6 ]; then
