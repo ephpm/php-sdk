@@ -8,6 +8,8 @@ Pre-built PHP embed SAPI static libraries (`libphp.a` / `php8embed.lib`) for eve
 |----|------|--------|
 | Linux | x86_64 | `libphp.a` + headers (musl, static) |
 | Linux | aarch64 | `libphp.a` + headers (musl, static) |
+| Linux | x86_64 | `libphp.a` + headers (glibc, `-gnu` tarball suffix) |
+| Linux | aarch64 | `libphp.a` + headers (glibc, `-gnu` tarball suffix) |
 | macOS | x86_64 | `libphp.a` + headers |
 | macOS | aarch64 | `libphp.a` + headers |
 | Windows | x86_64 | `php8embed.lib` + `php8embed.dll` + headers (from windows.php.net) |
