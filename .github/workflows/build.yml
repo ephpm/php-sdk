@@ -122,6 +122,14 @@ jobs:
               # Use native gcc instead of zig-cc. Native gcc links against
               # the image libc: musl on Alpine, glibc on Ubuntu.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
+              # CRITICAL for gnu builds: spc's env.ini defaults SPC_TARGET to
+              # <arch>-linux-musl on Linux, and its libc self-check then aborts
+              # with "linking against musl libc dynamically, but musl libc is
+              # not installed" even though the toolchain is native gcc. Real
+              # env vars win over env.ini, so set the target per libc flavor.
+              if [ "$LIBC" = "gnu" ]; then
+                export SPC_TARGET="$(uname -m)-linux-gnu"
+              fi
 
               mkdir -p /usr/local/bin
               curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
