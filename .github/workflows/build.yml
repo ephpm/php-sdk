@@ -19,6 +19,8 @@ on:
           - all
           - linux-x86_64
           - linux-aarch64
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
           - macos-aarch64
           - windows-x86_64
 
@@ -52,15 +54,22 @@ jobs:
         env:
           PLATFORM: ${{ inputs.platform }}
         run: |
-          linux_all='[{"arch":"x86_64","runner":["self-hosted","linux","x64"],"spc_arch":"x86_64"},{"arch":"aarch64","runner":["self-hosted","linux","arm64"],"spc_arch":"aarch64"}]'
-          linux_x64='[{"arch":"x86_64","runner":["self-hosted","linux","x64"],"spc_arch":"x86_64"}]'
-          linux_arm='[{"arch":"aarch64","runner":["self-hosted","linux","arm64"],"spc_arch":"aarch64"}]'
+          # Each Linux matrix entry picks a libc flavor via the container
+          # image: Alpine's native gcc links against musl (static-friendly),
+          # Ubuntu's native gcc links against glibc. "suffix" is appended to
+          # the tarball / artifact name ("" keeps the legacy musl names).
+          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","x64"]}'
+          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
-            all)              lm=$linux_all; mac=true;  win=true ;;
-            linux-x86_64)     lm=$linux_x64; mac=false; win=false ;;
-            linux-aarch64)    lm=$linux_arm; mac=false; win=false ;;
-            macos-aarch64)    lm='[]';       mac=true;  win=false ;;
-            windows-x86_64)   lm='[]';       mac=false; win=true ;;
+            all)                lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
+            linux-x86_64)       lm="[$musl_x64]"; mac=false; win=false ;;
+            linux-aarch64)      lm="[$musl_arm]"; mac=false; win=false ;;
+            linux-x86_64-gnu)   lm="[$gnu_x64]";  mac=false; win=false ;;
+            linux-aarch64-gnu)  lm="[$gnu_arm]";  mac=false; win=false ;;
+            macos-aarch64)      lm='[]';          mac=true;  win=false ;;
+            windows-x86_64)     lm='[]';          mac=false; win=true ;;
             *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
           esac
           echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
@@ -68,7 +77,7 @@ jobs:
           echo "build-windows=$win" >> "$GITHUB_OUTPUT"
 
   build-linux:
-    name: Linux (${{ matrix.arch }})
+    name: Linux (${{ matrix.arch }}, ${{ matrix.libc }})
     needs: setup
     if: needs.setup.outputs.linux-matrix != '[]'
     runs-on: ${{ matrix.runner }}
@@ -78,23 +87,40 @@ jobs:
         include: ${{ fromJSON(needs.setup.outputs.linux-matrix) }}
     steps:
       - name: Clean up previous builds
-        run: rm -rf output sdk *.tar.gz
-
-      - name: Build inside Alpine container
         run: |
-          docker run --name spc-build \
+          rm -rf output sdk *.tar.gz
+          docker rm -f "spc-build-${{ matrix.libc }}" 2>/dev/null || true
+
+      - name: Build inside container (${{ matrix.libc }})
+        # The container image decides the libc flavor: alpine (musl, the
+        # legacy fully-static SDK) or ubuntu (glibc, the "gnu" SDK that
+        # ephpm's dynamic Linux binaries link so PHP can dlopen shared
+        # extensions at runtime). Same spc invocation either way.
+        run: |
+          docker run --name "spc-build-${{ matrix.libc }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
-            docker.io/library/alpine:3.20 sh -c '
+            -e LIBC="${{ matrix.libc }}" \
+            "${{ matrix.image }}" sh -c '
               set -eux
 
-              apk add --no-cache \
-                bash curl git build-base autoconf automake bison cmake flex \
-                libtool make pkgconf re2c linux-headers tar xz
+              if [ "$LIBC" = "gnu" ]; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y --no-install-recommends \
+                  bash ca-certificates curl git build-essential autoconf \
+                  automake bison cmake flex libtool make pkg-config re2c \
+                  tar xz-utils
+              else
+                apk add --no-cache \
+                  bash curl git build-base autoconf automake bison cmake flex \
+                  libtool make pkgconf re2c linux-headers tar xz
+              fi
 
-              # Use native gcc instead of zig-cc - Alpine already has musl
+              # Use native gcc instead of zig-cc. Native gcc links against
+              # the image libc: musl on Alpine, glibc on Ubuntu.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
 
               mkdir -p /usr/local/bin
@@ -152,14 +178,14 @@ jobs:
               fi
               cp -RLf "$PHP_INC_DIR" /output/include/php
 
-              # Bundle the musl-built libstdc++.a so downstream consumers
-              # can link against the same C++ runtime spc used to compile
-              # libicu*, libxml2, etc. PHPs intl extension references C++
-              # symbols (std::__throw_bad_alloc, __cxa_begin_catch, ICU
-              # UnicodeString ctors, ...). Ubuntu/Debian build hosts have
-              # a glibc-flavored libstdc++ that is ABI-incompatible with
-              # musl PHP — without bundling this, downstream binaries
-              # either fail to link or silently mismix C++ runtimes.
+              # Bundle the container libstdc++.a (musl-flavored on Alpine,
+              # glibc-flavored on Ubuntu) so downstream consumers link
+              # against the same C++ runtime spc used to compile libicu*,
+              # libxml2, etc. PHPs intl extension references C++ symbols
+              # (std::__throw_bad_alloc, __cxa_begin_catch, ICU
+              # UnicodeString ctors, ...). Mixing libstdc++ flavors across
+              # libc boundaries makes downstream binaries either fail to
+              # link or silently mismix C++ runtimes.
               libstdcxx_path=$(c++ -print-file-name=libstdc++.a)
               if [ -f "$libstdcxx_path" ]; then
                 cp "$libstdcxx_path" /output/lib/
@@ -177,8 +203,8 @@ jobs:
           # form — observed to leave the source dir nested inside the
           # destination on some runner Docker versions, producing
           # ./lib/lib/*.a in the final tarball.
-          docker cp spc-build:/output ./
-          docker rm spc-build
+          docker cp "spc-build-${{ matrix.libc }}:/output" ./
+          docker rm "spc-build-${{ matrix.libc }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -200,13 +226,13 @@ jobs:
           fi
           echo "==> Version guard OK: staged PHP ${staged}"
 
-          tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz -C sdk .
+          tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz -C sdk .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}
-          path: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}.tar.gz
+          name: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}
+          path: php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz
 
   build-macos:
     name: macOS (${{ matrix.arch }})
@@ -726,6 +752,8 @@ jobs:
             |------|----------|
             | `php-sdk-${{ inputs.php_version }}-linux-x86_64.tar.gz` | Linux x86_64 (musl static) |
             | `php-sdk-${{ inputs.php_version }}-linux-aarch64.tar.gz` | Linux aarch64 (musl static) |
+            | `php-sdk-${{ inputs.php_version }}-linux-x86_64-gnu.tar.gz` | Linux x86_64 (glibc) |
+            | `php-sdk-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc) |
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
             | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
           files: artifacts/*.tar.gz
