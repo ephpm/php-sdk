@@ -131,9 +131,17 @@ jobs:
                 export SPC_TARGET="$(uname -m)-linux-gnu"
               fi
 
-              mkdir -p /usr/local/bin
+              # Extract spc into a fresh temp dir and PATH it: on the ubuntu
+              # image the runner's storage/userns combo denied writes into
+              # /usr/local/bin during extraction (run 28759904638) even though
+              # the identical step passes on alpine. A fresh /tmp dir is
+              # writable under any uid mapping. Debug line kept on purpose.
+              id && ls -ld /usr/local/bin || true
+              mkdir -p /tmp/spcbin
               curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
-                | tar xz -C /usr/local/bin
+                | tar xz --no-same-owner --no-same-permissions -C /tmp/spcbin
+              chmod +x /tmp/spcbin/spc
+              export PATH="/tmp/spcbin:${PATH}"
 
               mkdir /build && cd /build
               # Retry spc download to tolerate transient upstream flakes
