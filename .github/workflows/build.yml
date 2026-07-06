@@ -122,7 +122,7 @@ jobs:
               # Use native gcc instead of zig-cc. Native gcc links against
               # the image libc: musl on Alpine, glibc on Ubuntu.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
-              # CRITICAL for gnu builds: spc's env.ini defaults SPC_TARGET to
+              # CRITICAL for gnu builds: the spc env.ini defaults SPC_TARGET to
               # <arch>-linux-musl on Linux, and its libc self-check then aborts
               # with "linking against musl libc dynamically, but musl libc is
               # not installed" even though the toolchain is native gcc. Real
@@ -132,7 +132,7 @@ jobs:
               fi
 
               # Extract spc into a fresh temp dir and PATH it: on the ubuntu
-              # image the runner's storage/userns combo denied writes into
+              # image the runner storage/userns combo denied writes into
               # /usr/local/bin during extraction (run 28759904638) even though
               # the identical step passes on alpine. A fresh /tmp dir is
               # writable under any uid mapping. Debug line kept on purpose.
@@ -148,12 +148,12 @@ jobs:
               # (gnu.org libiconv mirror, pecl.php.net, GitHub API rate
               # limits). Up to 6 attempts with 2-3s jitter between (~15s).
               # php-src comes from our own GitHub mirror (release tag
-              # "php-sources"): the runner fleet's egress to php.net is
+              # "php-sources"): fleet egress to php.net is
               # unreliable (release-info API refused every attempt on
               # 2026-07-06 while GitHub worked throughout), and pinned
               # tarballs also make builds deterministic. Pre-fetch with plain
               # curl (the same mechanism that fetches spc itself, proven on
-              # the fleet) and hand spc a file:// URL — spc's own HTTP client
+              # the fleet) and hand spc a file:// URL — the spc internal HTTP client
               # failed on the release-asset redirect from the runner (curl
               # exit 22, run 28761831602) while plain curl succeeds. Refresh
               # the mirror when bumping pinned PHP versions.
