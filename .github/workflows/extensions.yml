@@ -1,0 +1,390 @@
+name: Build ZTS Extension Catalog
+run-name: "Build extensions for PHP ${{ inputs.php_version }}"
+
+# Builds loadable ZTS glibc shared extension .so files for ephpm.
+#
+# WHY THIS EXISTS
+# ephpm ships glibc-dynamic Linux release binaries that dlopen PHP shared
+# extensions at runtime via the [php] extensions = [...] config knob. Debian
+# and Sury publish ZERO ZTS extension builds, so there is nothing off-the-shelf
+# for users to load. This workflow is the primary source of loadable
+# extensions for that fleet.
+#
+# ABI MATCH REQUIREMENT (hard)
+# Each .so must match the ephpm PHP binary ABI exactly or PHP rejects it at
+# load time:
+#   - same PHP minor as the SDK the ephpm binary was linked against
+#   - ZTS (thread-safe) build. An NTS .so fails with
+#     "undefined symbol: compiler_globals"
+#   - glibc (gnu) libc, non-debug
+# The SDK tarballs from build.yml are ZTS + embed; these extensions are built
+# against a PHP compiled from the SAME pinned source (our php-sources mirror)
+# with the SAME --enable-zts flag, so the module API numbers line up.
+#
+# BUILD MACHINERY
+# Reuses build.yml's gnu container flow verbatim: ubuntu:24.04 container,
+# native gcc (= glibc), SPC_TARGET=<arch>-linux-gnu, spc fetched to /tmp/spcbin
+# and PATHed, php-src pre-fetched by plain curl from our own php-sources
+# release tag and handed to spc as a file:// custom-url. The only new piece is
+# `spc build ... --build-shared=<exts>`, spc's native loadable-.so path (the
+# -D / --build-shared flag on build:php), which emits per-extension .so files
+# linked against the embed+ZTS PHP built in the same invocation.
+#
+# HARD RULE (cost 5 failed CI runs, see build.yml history)
+# The container step passes its script as a single-quoted `sh -c '...'`. NO
+# apostrophes anywhere inside that block - a stray apostrophe in a comment
+# terminates the quote and the rest silently runs on the runner host, not the
+# container. The `id` debug line proves we are inside the container (container
+# uid, not the uid=1001 self-hosted runner).
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: "PHP version to build extensions for (e.g. 8.5.7)"
+        required: true
+        type: string
+      platform:
+        description: "Which glibc platform(s) to build extensions for."
+        required: false
+        type: choice
+        default: linux-x86_64-gnu
+        options:
+          - all
+          - linux-x86_64-gnu
+          - linux-aarch64-gnu
+      extensions:
+        description: "Comma-separated extensions to build (curated ZTS-clean set)"
+        required: false
+        type: string
+        default: "igbinary,msgpack,apcu,redis,mongodb"
+
+env:
+  SPC_VERSION: "v3.0.0-pgo-rc15"
+
+jobs:
+  # Resolve the platform input into a Linux matrix, mirroring build.yml.setup.
+  # Only glibc (gnu) flavors: ephpm dlopens extensions from its glibc-dynamic
+  # Linux binaries. The musl fully-static SDK never dlopens anything.
+  setup:
+    name: Setup (resolve target platforms)
+    runs-on: ubuntu-latest
+    outputs:
+      linux-matrix: ${{ steps.compute.outputs.linux-matrix }}
+    steps:
+      - id: compute
+        env:
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          case "$PLATFORM" in
+            all)                lm="[$gnu_x64,$gnu_arm]" ;;
+            linux-x86_64-gnu)   lm="[$gnu_x64]" ;;
+            linux-aarch64-gnu)  lm="[$gnu_arm]" ;;
+            *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
+          esac
+          echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
+
+  build-extensions:
+    name: Extensions (${{ matrix.arch }}, ${{ matrix.libc }})
+    needs: setup
+    if: needs.setup.outputs.linux-matrix != '[]'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.linux-matrix) }}
+    steps:
+      - name: Clean up previous builds
+        run: |
+          rm -rf output ext-out *.tar.gz
+          docker rm -f "spc-ext-${{ matrix.libc }}" 2>/dev/null || true
+
+      - name: Build shared extensions inside container (${{ matrix.libc }})
+        # Same ubuntu:24.04 + native gcc (glibc) container as build.yml. The
+        # single change from the SDK build is --build-shared=<exts>, which asks
+        # spc to emit standalone loadable .so files in addition to the embed
+        # PHP. Everything else (SPC_TARGET, /tmp/spcbin, file:// php-src) is
+        # copied verbatim to preserve the fleet fixes those lines encode.
+        run: |
+          docker run --name "spc-ext-${{ matrix.libc }}" \
+            -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            -e SPC_VERSION="${{ env.SPC_VERSION }}" \
+            -e PHP_VERSION="${{ inputs.php_version }}" \
+            -e EXTENSIONS="${{ inputs.extensions }}" \
+            -e LIBC="${{ matrix.libc }}" \
+            "${{ matrix.image }}" sh -c '
+              set -eux
+
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                bash ca-certificates curl git build-essential autoconf \
+                automake bison cmake flex libtool make pkg-config re2c \
+                tar xz-utils file binutils python3 jq
+
+              # Native gcc links against the image libc: glibc on Ubuntu.
+              export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
+              # gnu builds must override the env.ini default SPC_TARGET of
+              # <arch>-linux-musl or the libc self-check aborts (see build.yml).
+              export SPC_TARGET="$(uname -m)-linux-gnu"
+
+              # Prove we are inside the container: this must print the
+              # container uid (root), never uid=1001 the self-hosted runner.
+              id && ls -ld /usr/local/bin || true
+
+              # Extract spc into a fresh temp dir and PATH it (userns write
+              # denial into /usr/local/bin on the ubuntu image, see build.yml).
+              mkdir -p /tmp/spcbin
+              curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
+                | tar xz --no-same-owner --no-same-permissions -C /tmp/spcbin
+              chmod +x /tmp/spcbin/spc
+              export PATH="/tmp/spcbin:${PATH}"
+
+              mkdir /build && cd /build
+
+              # php-src from our own GitHub mirror (release tag php-sources):
+              # fleet egress to php.net is unreliable and pinned tarballs make
+              # builds deterministic. Pre-fetch with plain curl and hand spc a
+              # file:// URL (spc internal HTTP client fails on the release-asset
+              # redirect from the runner). Refresh the mirror when bumping PHP.
+              j=0
+              until curl -fsSL -o /tmp/php-src-mirror.tar.gz \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"; do
+                j=$((j + 1))
+                if [ "$j" -ge 5 ]; then
+                  echo "mirror fetch failed after $j attempts" >&2
+                  exit 1
+                fi
+                sleep 3
+              done
+
+              # Download php-src plus the source for every extension we build:
+              # the minimal static base compiled into the embed PHP AND the
+              # shared catalog. Both must be resolvable or spc download errors.
+              # Retry to tolerate transient upstream flakes (pecl, GitHub API).
+              ALL_EXTENSIONS="pcre,mbstring,session,openssl,hash,json,filter,${EXTENSIONS}"
+              i=0
+              until spc download \
+                  --with-php=${PHP_VERSION} \
+                  --for-extensions=${ALL_EXTENSIONS} \
+                  --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                  --prefer-pre-built; do
+                i=$((i + 1))
+                if [ "$i" -ge 6 ]; then
+                  echo "spc download failed after $i attempts" >&2
+                  exit 1
+                fi
+                s=$(awk "BEGIN{srand(); print 2+int(rand()*2)}")
+                echo "spc download flaked (attempt $i), retrying in ${s}s..."
+                sleep "$s"
+              done
+
+              spc doctor --auto-fix || true
+
+              # Build an embed + ZTS PHP from the pinned source and, in the same
+              # invocation, emit each requested extension as a loadable shared
+              # .so via --build-shared. --dl-with-php pins the build-phase
+              # downloader to the requested version (see build.yml for the
+              # mislabel incident this prevents). --enable-zts is the ABI
+              # contract: the .so files export/import thread-safe symbols so
+              # ephpm (also ZTS) can dlopen them. A non-ZTS .so would fail with
+              # undefined symbol compiler_globals at load.
+              # NOTE: this comment is inside a single-quoted sh -c block -
+              # apostrophes here would terminate the string. Keep it apostrophe
+              # free.
+              # The positional <extensions> is REQUIRED by spc build:php even
+              # when only shared output is wanted (empirically: omitting it
+              # fails with "Not enough arguments (missing extensions)"). It is
+              # the STATIC set compiled into the embed PHP that the shared .so
+              # files then link/load against. Use a minimal base that satisfies
+              # the catalog deps (session for redis, openssl/hash for mongodb,
+              # pcre/mbstring are near-universal) rather than compiling every
+              # heavy catalog ext (mongodb, grpc) statically too. --build-shared
+              # carries the actual loadable catalog. Confirmed locally: with
+              # igbinary in both slots the shared igbinary.so lands in
+              # buildroot/modules and passes the ZTS nm check.
+              BASE_EXTENSIONS="pcre,mbstring,session,openssl,hash,json,filter"
+              spc build ${BASE_EXTENSIONS} \
+                --dl-with-php=${PHP_VERSION} \
+                --build-embed \
+                --enable-zts \
+                --no-strip \
+                --build-shared=${EXTENSIONS}
+
+              # Version guard: the PHP we built the extensions against must be
+              # the requested version. spc has silently fallen back to latest
+              # stable before (see build.yml). Read it from the staged headers.
+              PHP_VER_H=$(find /build/buildroot/include -name php_version.h -path "*main*" | head -n 1)
+              staged=$(sed -n "s/^#define PHP_VERSION \"\\(.*\\)\"/\\1/p" "$PHP_VER_H")
+              if [ "$staged" != "${PHP_VERSION}" ]; then
+                echo "::error::extensions built against PHP $staged but asked for ${PHP_VERSION}" >&2
+                exit 1
+              fi
+              echo "==> Version guard OK: extensions built against PHP $staged"
+
+              # The Zend module API number every .so is stamped with. ephpm and
+              # every loadable .so must share it. Pulled from the same headers
+              # the extensions compiled against.
+              API_H=$(find /build/buildroot/include -name zend_modules.h | head -n 1)
+              PHP_API_NO=$(sed -n "s/^#define ZEND_MODULE_API_NO \\([0-9]*\\).*/\\1/p" "$API_H")
+              echo "==> ZEND_MODULE_API_NO=${PHP_API_NO}"
+
+              # Collect the shared .so files. spc emits build-shared output under
+              # buildroot; discover by find rather than assuming a fixed path
+              # (spc install layout nests at varying depths, see build.yml).
+              mkdir -p /output/ext
+              found=0
+              for ext in $(echo "${EXTENSIONS}" | tr "," " "); do
+                so=$(find /build/buildroot -name "${ext}.so" -type f 2>/dev/null | head -n 1)
+                if [ -z "$so" ]; then
+                  echo "::warning::no .so produced for ${ext} - deferred or build-shared unsupported for it"
+                  continue
+                fi
+                cp -Lf "$so" /output/ext/
+                found=$((found + 1))
+                echo "==> staged ${ext}.so from $so"
+              done
+              if [ "$found" -eq 0 ]; then
+                echo "::error::no shared extension .so files were produced" >&2
+                echo "==> full .so inventory under buildroot for debugging:" >&2
+                find /build/buildroot -name "*.so" -type f >&2 || true
+                exit 1
+              fi
+
+              # Verify each .so is ZTS and loadable. A ZTS ext .so:
+              #   - exports get_module (the module entry PHP dlsym-s)
+              #   - imports (U, undefined) TSRM globals ACCESSOR symbols:
+              #     *_globals_offset / *_globals_id / ts_allocate_id /
+              #     tsrm_get_ls_cache. An NTS .so instead references the raw
+              #     compiler_globals / executor_globals structs directly and
+              #     carries none of the _offset/_id/tsrm_ accessors - and would
+              #     fail to load into ephpm with "undefined symbol
+              #     compiler_globals". Verified locally against igbinary.so
+              #     (PHP 8.5.7): U basic_globals_id, U compiler_globals_offset,
+              #     U executor_globals_offset, U ts_allocate_id,
+              #     U tsrm_get_ls_cache.
+              for so in /output/ext/*.so; do
+                echo "==> nm sanity for $so"
+                if ! nm -D "$so" 2>/dev/null | grep -q "get_module"; then
+                  echo "::error::$so does not export get_module - not a loadable PHP module" >&2
+                  exit 1
+                fi
+                if nm -D "$so" 2>/dev/null | grep -Eq "_globals_offset|_globals_id|ts_allocate_id|tsrm_get_ls_cache"; then
+                  echo "    ZTS symbols present (TSRM globals accessors)"
+                else
+                  echo "::error::$so has no TSRM accessor symbols - built NTS, would fail ephpm load" >&2
+                  exit 1
+                fi
+              done
+
+              # Build manifest.json: one entry per staged .so with name,
+              # extension version (from its .so via php ext version string if
+              # present, else unknown), php_api_no, zts=1, sha256.
+              cd /output/ext
+              {
+                echo "{"
+                echo "  \"php_version\": \"${PHP_VERSION}\","
+                echo "  \"php_api_no\": \"${PHP_API_NO}\","
+                echo "  \"zts\": 1,"
+                echo "  \"libc\": \"gnu\","
+                echo "  \"arch\": \"$(uname -m)\","
+                echo "  \"extensions\": ["
+                first=1
+                for so in *.so; do
+                  name="${so%.so}"
+                  ver=$(strings "$so" 2>/dev/null | grep -E "^${name} [0-9]" | head -n 1 | awk "{print \$2}")
+                  if [ -z "$ver" ]; then ver="unknown"; fi
+                  sha=$(sha256sum "$so" | cut -d" " -f1)
+                  if [ "$first" -eq 0 ]; then echo "    ,"; fi
+                  first=0
+                  echo "    {"
+                  echo "      \"name\": \"${name}\","
+                  echo "      \"file\": \"${so}\","
+                  echo "      \"version\": \"${ver}\","
+                  echo "      \"php_api_no\": \"${PHP_API_NO}\","
+                  echo "      \"zts\": 1,"
+                  echo "      \"sha256\": \"${sha}\""
+                  echo "    }"
+                done
+                echo "  ]"
+                echo "}"
+              } > /output/ext/manifest.json
+              echo "==> manifest.json:"
+              cat /output/ext/manifest.json
+              jq . /output/ext/manifest.json > /dev/null && echo "==> manifest.json is valid JSON"
+            '
+
+          # Copy staged artifacts out of the stopped container. Use the plain
+          # src-dir form (not /output/.) per build.yml to avoid double nesting.
+          docker cp "spc-ext-${{ matrix.libc }}:/output/ext" ./ext-out
+          docker rm "spc-ext-${{ matrix.libc }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package extension catalog
+        run: |
+          ls -lh ext-out/
+          test -f ext-out/manifest.json || { echo "::error::manifest.json missing"; exit 1; }
+          # Fail if not a single .so made it through (all deferred).
+          so_count=$(find ext-out -name "*.so" -type f | wc -l)
+          if [ "$so_count" -eq 0 ]; then
+            echo "::error::no .so files in ext-out - every extension deferred"
+            exit 1
+          fi
+          echo "==> $so_count extension .so file(s) packaged"
+          tar czf ephpm-ext-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz -C ext-out .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ephpm-ext-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}
+          path: ephpm-ext-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz
+
+  release:
+    name: Create extension release
+    needs: build-extensions
+    if: |
+      always()
+      && needs.build-extensions.result != 'failure'
+    runs-on: [self-hosted, linux, x64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/ || { echo "::error::no artifacts produced"; exit 1; }
+
+      - name: Create or update extension release
+        uses: softprops/action-gh-release@v2
+        # Separate tag from the SDK releases (v<ver>): ext-<ver>. action-gh-release
+        # replaces only the assets whose filenames match, so a partial rebuild
+        # (one arch) leaves the other arch tarball attached to ext-<ver>.
+        with:
+          tag_name: ext-${{ inputs.php_version }}
+          name: PHP ${{ inputs.php_version }} ZTS extensions
+          body: |
+            Loadable ZTS glibc (gnu) shared extensions for ephpm PHP ${{ inputs.php_version }}.
+
+            **PHP version:** ${{ inputs.php_version }}
+            **Requested extensions:** ${{ inputs.extensions }}
+
+            These .so files match the ephpm ABI: same PHP minor + ZTS + glibc +
+            non-debug. Load them via ephpm `[php] extensions = [...]`. Debian and
+            Sury publish no ZTS extension builds, so this is the primary source.
+
+            Each tarball contains the `.so` files plus a `manifest.json`
+            (ext name, version, php_api_no, zts=1, sha256 per file).
+
+            ## Artifacts
+
+            | File | Platform |
+            |------|----------|
+            | `ephpm-ext-${{ inputs.php_version }}-linux-x86_64-gnu.tar.gz` | Linux x86_64 (glibc, ZTS) |
+            | `ephpm-ext-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc, ZTS) |
+          files: artifacts/*.tar.gz
