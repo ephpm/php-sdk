@@ -55,13 +55,19 @@ jobs:
           PLATFORM: ${{ inputs.platform }}
         run: |
           # Each Linux matrix entry picks a libc flavor via the container
-          # image: Alpine's native gcc links against musl (static-friendly),
-          # Ubuntu's native gcc links against glibc. "suffix" is appended to
-          # the tarball / artifact name ("" keeps the legacy musl names).
+          # image: Alpine's native gcc links against musl (static-friendly).
+          # The gnu flavor builds on the manylinux_2_28 image (AlmaLinux 8,
+          # glibc 2.28, gcc-toolset-14) so the resulting libphp.a carries a
+          # glibc symbol floor of 2.28 instead of 24.04's 2.39 -- a modern
+          # GCC over an old glibc, the manylinux model. glibc forward-compat
+          # means a 2.28-floored consumer binary runs on RHEL8/AlmaLinux8,
+          # Ubuntu 20.04+, Debian 10+, Amazon Linux 2023, Fedora 40+.
+          # "suffix" is appended to the tarball / artifact name ("" keeps the
+          # legacy musl names).
           musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","x64"]}'
           musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","arm64"]}'
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/ubuntu:24.04","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_x86_64","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_aarch64","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
             linux-x86_64)       lm="[$musl_x64]"; mac=false; win=false ;;
@@ -107,12 +113,18 @@ jobs:
               set -eux
 
               if [ "$LIBC" = "gnu" ]; then
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update
-                apt-get install -y --no-install-recommends \
-                  bash ca-certificates curl git build-essential autoconf \
-                  automake bison cmake flex libtool make pkg-config re2c \
-                  tar xz-utils
+                # manylinux_2_28 = AlmaLinux 8 (dnf), glibc 2.28, with a
+                # modern GCC 14 in gcc-toolset-14 (already on the image). dnf
+                # installs the spc build deps that are not preinstalled; spc
+                # doctor --auto-fix builds the rest (re2c/pkg-config) from
+                # source if still missing. Enable gcc-toolset-14 so the
+                # GccNativeToolchain picks up GCC 14 (glibc 2.28 headers, but
+                # a modern compiler) rather than the base gcc 8.
+                dnf install -y --allowerasing \
+                  bash ca-certificates curl git gcc-toolset-14 autoconf \
+                  automake bison cmake flex libtool make pkgconfig re2c \
+                  tar xz which
+                . /opt/rh/gcc-toolset-14/enable
               else
                 apk add --no-cache \
                   bash curl git build-base autoconf automake bison cmake flex \
@@ -120,7 +132,7 @@ jobs:
               fi
 
               # Use native gcc instead of zig-cc. Native gcc links against
-              # the image libc: musl on Alpine, glibc on Ubuntu.
+              # the image libc: musl on Alpine, glibc 2.28 on manylinux_2_28.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
               # CRITICAL for gnu builds: the spc env.ini defaults SPC_TARGET to
               # <arch>-linux-musl on Linux, and its libc self-check then aborts
@@ -789,8 +801,8 @@ jobs:
             |------|----------|
             | `php-sdk-${{ inputs.php_version }}-linux-x86_64.tar.gz` | Linux x86_64 (musl static) |
             | `php-sdk-${{ inputs.php_version }}-linux-aarch64.tar.gz` | Linux aarch64 (musl static) |
-            | `php-sdk-${{ inputs.php_version }}-linux-x86_64-gnu.tar.gz` | Linux x86_64 (glibc) |
-            | `php-sdk-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc) |
+            | `php-sdk-${{ inputs.php_version }}-linux-x86_64-gnu.tar.gz` | Linux x86_64 (glibc, floor 2.28) |
+            | `php-sdk-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc, floor 2.28) |
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
             | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
           files: artifacts/*.tar.gz
