@@ -37,6 +37,16 @@ env:
   # `mbregex` in BOTH lists alongside `mbstring`.
   PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
+# Supersede stale builds: a new dispatch for the same version+platform cancels
+# an older still-queued/running one. Keyed on php_version AND platform so
+# independent targets (e.g. 8.3.31 and 8.4.22, or macos vs linux) still build
+# in parallel -- only a genuine re-dispatch of the SAME target is cancelled.
+# This is what prevents an un-dispatched run from lingering "queued" forever
+# (a self-hosted runner then loops provisioning a VM it can never satisfy).
+concurrency:
+  group: build-${{ github.ref }}-${{ inputs.php_version }}-${{ inputs.platform }}
+  cancel-in-progress: true
+
 jobs:
   # Compute which jobs / matrix entries actually run based on the `platform`
   # input. Each build job below reads from these outputs so we can target a
