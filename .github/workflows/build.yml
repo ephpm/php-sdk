@@ -56,21 +56,23 @@ jobs:
         run: |
           # Each Linux matrix entry picks a libc flavor via the container
           # image: Alpine's native gcc links against musl (static-friendly).
-          # The gnu flavor builds on almalinux:8 (glibc 2.28) with GCC 14 from
-          # gcc-toolset-14, so the resulting libphp.a carries a glibc symbol
-          # floor of 2.28 instead of 24.04's 2.39 -- a modern GCC over an old
-          # glibc, the manylinux model. (AlmaLinux 8 is a Docker-format image
-          # the runner fleet can run; the quay.io manylinux images are OCI
-          # indexes the fleet Docker rejects with "object required".) glibc
-          # forward-compat
+          # The gnu flavor builds on manylinux_2_28 (AlmaLinux 8, glibc 2.28)
+          # with GCC 14 from gcc-toolset-14, so the resulting libphp.a carries
+          # a glibc symbol floor of 2.28 instead of 24.04's 2.39 -- a modern
+          # GCC over an old glibc, the manylinux model. manylinux bakes in the
+          # old-glibc portability shims (e.g. strlcpy) that let PHP's ext
+          # compile on glibc 2.28 where stock almalinux:8 fails. The images are
+          # OCI indexes, so "dplatform" + `docker run --platform` makes the
+          # fleet Docker pick the arch manifest instead of erroring "object
+          # required". glibc forward-compat
           # means a 2.28-floored consumer binary runs on RHEL8/AlmaLinux8,
           # Ubuntu 20.04+, Debian 10+, Amazon Linux 2023, Fedora 40+.
           # "suffix" is appended to the tarball / artifact name ("" keeps the
           # legacy musl names).
-          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","x64"]}'
-          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","arm64"]}'
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","dplatform":"linux/amd64","suffix":"","runner":["self-hosted","linux","x64"]}'
+          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","dplatform":"linux/arm64","suffix":"","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_x86_64","dplatform":"linux/amd64","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_aarch64","dplatform":"linux/arm64","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
             linux-x86_64)       lm="[$musl_x64]"; mac=false; win=false ;;
@@ -107,6 +109,7 @@ jobs:
         # extensions at runtime). Same spc invocation either way.
         run: |
           docker run --name "spc-build-${{ matrix.libc }}" \
+            --platform "${{ matrix.dplatform }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
@@ -116,23 +119,20 @@ jobs:
               set -eux
 
               if [ "$LIBC" = "gnu" ]; then
-                # almalinux:8 = glibc 2.28, dnf. Unlike the manylinux images
-                # (which preinstall build tools), plain almalinux:8 lacks re2c
-                # and it is not in the base repos or EPEL-8 -- enable EPEL +
-                # PowerTools for the best chance, install the mandatory deps
-                # WITHOUT re2c (so a missing re2c never aborts them), then try
-                # re2c best-effort; spc doctor --auto-fix builds re2c/pkg-config
-                # from source if still absent (line ~200). Enable gcc-toolset-14
-                # so the GccNativeToolchain uses GCC 14 (glibc 2.28 headers,
-                # modern compiler) rather than the base gcc 8.
-                dnf install -y dnf-plugins-core epel-release
-                dnf config-manager --set-enabled powertools 2>/dev/null \
-                  || dnf config-manager --set-enabled crb 2>/dev/null || true
+                # manylinux_2_28 = AlmaLinux 8, glibc 2.28, with gcc-toolset-14
+                # AND the build tools (incl. re2c, and the strlcpy/portability
+                # shims manylinux bakes in for building on old glibc) already
+                # present -- which is why it compiles PHP's ext/openssl on
+                # glibc 2.28 where stock almalinux:8 does not. Run it via
+                # --platform (the images are OCI indexes; --platform makes the
+                # fleet Docker select the arch manifest instead of erroring
+                # "object required"). dnf-install the few deps not preinstalled;
+                # spc doctor --auto-fix covers anything else. Enable
+                # gcc-toolset-14 so the GccNativeToolchain uses GCC 14.
                 dnf install -y --allowerasing \
                   bash ca-certificates curl git gcc-toolset-14 autoconf \
-                  automake bison cmake flex libtool make pkgconfig \
+                  automake bison cmake flex libtool make pkgconfig re2c \
                   tar xz which
-                dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
                 . /opt/rh/gcc-toolset-14/enable
               else
                 apk add --no-cache \

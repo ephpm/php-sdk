@@ -81,8 +81,8 @@ jobs:
           # the .so files match the SDK's glibc 2.28 floor. A catalog compiled
           # on a newer glibc would refuse to load into a 2.28-floored ephpm
           # binary on older hosts.
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_x86_64","dplatform":"linux/amd64","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_aarch64","dplatform":"linux/arm64","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                lm="[$gnu_x64,$gnu_arm]" ;;
             linux-x86_64-gnu)   lm="[$gnu_x64]" ;;
@@ -115,6 +115,7 @@ jobs:
         # fleet fixes those lines encode.
         run: |
           docker run --name "spc-ext-${{ matrix.libc }}" \
+            --platform "${{ matrix.dplatform }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
@@ -123,23 +124,18 @@ jobs:
             "${{ matrix.image }}" sh -c '
               set -eux
 
-              # almalinux:8 = glibc 2.28, dnf. re2c is not in base/EPEL-8 on
-              # AlmaLinux 8 (manylinux preinstalled it), so enable EPEL +
-              # PowerTools, install the mandatory deps WITHOUT re2c so a missing
-              # re2c never aborts them, then try re2c best-effort; spc doctor
-              # --auto-fix builds it from source if absent. Enable gcc-toolset-14
-              # so the GccNativeToolchain uses GCC 14, not the base gcc 8.
-              dnf install -y dnf-plugins-core epel-release
-              dnf config-manager --set-enabled powertools 2>/dev/null \
-                || dnf config-manager --set-enabled crb 2>/dev/null || true
+              # manylinux_2_28 (AlmaLinux 8, glibc 2.28) with gcc-toolset-14 and
+              # build tools (incl. re2c + old-glibc portability shims) already
+              # present -- run via --platform so the fleet Docker selects the
+              # arch manifest from the OCI index. Install the few extras;
+              # enable gcc-toolset-14 for GCC 14.
               dnf install -y --allowerasing \
                 bash ca-certificates curl git gcc-toolset-14 autoconf \
-                automake bison cmake flex libtool make pkgconfig \
+                automake bison cmake flex libtool make pkgconfig re2c \
                 tar xz which file binutils python3 jq
-              dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
               . /opt/rh/gcc-toolset-14/enable
 
-              # Native gcc links against the image libc: glibc 2.28 on almalinux:8.
+              # Native gcc links against the image libc: glibc 2.28 on manylinux.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
               # gnu builds must override the env.ini default SPC_TARGET of
               # <arch>-linux-musl or the libc self-check aborts (see build.yml).
