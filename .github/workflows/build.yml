@@ -117,19 +117,22 @@ jobs:
 
               if [ "$LIBC" = "gnu" ]; then
                 # almalinux:8 = glibc 2.28, dnf. Unlike the manylinux images
-                # (which preinstall build tools), plain almalinux:8 lacks re2c,
-                # and re2c lives in EPEL -- enable it first so the install line
-                # does not abort on "No match for argument: re2c". Then install
-                # the spc build deps + gcc-toolset-14 (modern GCC 14 over the
-                # 2.28 glibc headers). spc doctor --auto-fix builds anything
-                # still missing from source. Enable gcc-toolset-14 so the
-                # GccNativeToolchain picks up GCC 14 (glibc 2.28 headers, but
-                # a modern compiler) rather than the base gcc 8.
-                dnf install -y epel-release
+                # (which preinstall build tools), plain almalinux:8 lacks re2c
+                # and it is not in the base repos or EPEL-8 -- enable EPEL +
+                # PowerTools for the best chance, install the mandatory deps
+                # WITHOUT re2c (so a missing re2c never aborts them), then try
+                # re2c best-effort; spc doctor --auto-fix builds re2c/pkg-config
+                # from source if still absent (line ~200). Enable gcc-toolset-14
+                # so the GccNativeToolchain uses GCC 14 (glibc 2.28 headers,
+                # modern compiler) rather than the base gcc 8.
+                dnf install -y dnf-plugins-core epel-release
+                dnf config-manager --set-enabled powertools 2>/dev/null \
+                  || dnf config-manager --set-enabled crb 2>/dev/null || true
                 dnf install -y --allowerasing \
                   bash ca-certificates curl git gcc-toolset-14 autoconf \
-                  automake bison cmake flex libtool make pkgconfig re2c \
+                  automake bison cmake flex libtool make pkgconfig \
                   tar xz which
+                dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
                 . /opt/rh/gcc-toolset-14/enable
               else
                 apk add --no-cache \

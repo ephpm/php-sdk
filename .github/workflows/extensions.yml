@@ -123,16 +123,20 @@ jobs:
             "${{ matrix.image }}" sh -c '
               set -eux
 
-              # almalinux:8 = glibc 2.28, dnf. re2c is EPEL-only on AlmaLinux 8
-              # (not preinstalled as on the manylinux images), so enable EPEL
-              # first or the install aborts on "No match for argument: re2c".
-              # Then install gcc-toolset-14 (modern GCC 14 over the 2.28 floor)
-              # and enable it so the GccNativeToolchain uses GCC 14, not gcc 8.
-              dnf install -y epel-release
+              # almalinux:8 = glibc 2.28, dnf. re2c is not in base/EPEL-8 on
+              # AlmaLinux 8 (manylinux preinstalled it), so enable EPEL +
+              # PowerTools, install the mandatory deps WITHOUT re2c so a missing
+              # re2c never aborts them, then try re2c best-effort; spc doctor
+              # --auto-fix builds it from source if absent. Enable gcc-toolset-14
+              # so the GccNativeToolchain uses GCC 14, not the base gcc 8.
+              dnf install -y dnf-plugins-core epel-release
+              dnf config-manager --set-enabled powertools 2>/dev/null \
+                || dnf config-manager --set-enabled crb 2>/dev/null || true
               dnf install -y --allowerasing \
                 bash ca-certificates curl git gcc-toolset-14 autoconf \
-                automake bison cmake flex libtool make pkgconfig re2c \
+                automake bison cmake flex libtool make pkgconfig \
                 tar xz which file binutils python3 jq
+              dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
               . /opt/rh/gcc-toolset-14/enable
 
               # Native gcc links against the image libc: glibc 2.28 on almalinux:8.
