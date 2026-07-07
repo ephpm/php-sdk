@@ -56,23 +56,22 @@ jobs:
         run: |
           # Each Linux matrix entry picks a libc flavor via the container
           # image: Alpine's native gcc links against musl (static-friendly).
-          # The gnu flavor builds on manylinux_2_28 (AlmaLinux 8, glibc 2.28)
-          # with GCC 14 from gcc-toolset-14, so the resulting libphp.a carries
-          # a glibc symbol floor of 2.28 instead of 24.04's 2.39 -- a modern
-          # GCC over an old glibc, the manylinux model. manylinux bakes in the
-          # old-glibc portability shims (e.g. strlcpy) that let PHP's ext
-          # compile on glibc 2.28 where stock almalinux:8 fails. The images are
-          # OCI indexes, so "dplatform" + `docker run --platform` makes the
-          # fleet Docker pick the arch manifest instead of erroring "object
-          # required". glibc forward-compat
+          # The gnu flavor builds on almalinux:8 (glibc 2.28) with GCC 13 from
+          # gcc-toolset-13, so the resulting libphp.a carries a glibc symbol
+          # floor of 2.28 instead of 24.04's 2.39 -- a modern GCC over an old
+          # glibc, the manylinux model, on a Docker-format image the fleet can
+          # run (the quay manylinux images are OCI indexes the fleet Docker
+          # rejects). GCC 13 (not 14) because GCC 14 hard-errors on the
+          # implicit strlcpy in PHP ext/openssl on glibc 2.28 (see the build
+          # step). glibc forward-compat
           # means a 2.28-floored consumer binary runs on RHEL8/AlmaLinux8,
           # Ubuntu 20.04+, Debian 10+, Amazon Linux 2023, Fedora 40+.
           # "suffix" is appended to the tarball / artifact name ("" keeps the
           # legacy musl names).
-          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","dplatform":"linux/amd64","suffix":"","runner":["self-hosted","linux","x64"]}'
-          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","dplatform":"linux/arm64","suffix":"","runner":["self-hosted","linux","arm64"]}'
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_x86_64","dplatform":"linux/amd64","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"quay.io/pypa/manylinux_2_28_aarch64","dplatform":"linux/arm64","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","x64"]}'
+          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
             linux-x86_64)       lm="[$musl_x64]"; mac=false; win=false ;;
@@ -109,7 +108,6 @@ jobs:
         # extensions at runtime). Same spc invocation either way.
         run: |
           docker run --name "spc-build-${{ matrix.libc }}" \
-            --platform "${{ matrix.dplatform }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
@@ -119,21 +117,26 @@ jobs:
               set -eux
 
               if [ "$LIBC" = "gnu" ]; then
-                # manylinux_2_28 = AlmaLinux 8, glibc 2.28, with gcc-toolset-14
-                # AND the build tools (incl. re2c, and the strlcpy/portability
-                # shims manylinux bakes in for building on old glibc) already
-                # present -- which is why it compiles PHP's ext/openssl on
-                # glibc 2.28 where stock almalinux:8 does not. Run it via
-                # --platform (the images are OCI indexes; --platform makes the
-                # fleet Docker select the arch manifest instead of erroring
-                # "object required"). dnf-install the few deps not preinstalled;
-                # spc doctor --auto-fix covers anything else. Enable
-                # gcc-toolset-14 so the GccNativeToolchain uses GCC 14.
+                # almalinux:8 = glibc 2.28, a Docker-format image the fleet can
+                # run (the quay manylinux images are OCI indexes the fleet
+                # Docker refuses even with --platform). Use gcc-toolset-13, NOT
+                # 14: GCC 14 promotes -Wimplicit-function-declaration to a hard
+                # ERROR, and PHP ext/openssl on glibc 2.28 calls strlcpy (added
+                # to glibc only in 2.38) without an in-scope prototype -- PHP
+                # bundles its own strlcpy symbol so it LINKS, but GCC 14 fails
+                # at COMPILE. GCC 13 keeps it a warning, so it builds and links
+                # against PHP built-in strlcpy. re2c is EPEL/PowerTools on
+                # AlmaLinux 8 (not preinstalled); enable both, keep re2c
+                # non-fatal, and let spc doctor --auto-fix build it if absent.
+                dnf install -y dnf-plugins-core epel-release
+                dnf config-manager --set-enabled powertools 2>/dev/null \
+                  || dnf config-manager --set-enabled crb 2>/dev/null || true
                 dnf install -y --allowerasing \
-                  bash ca-certificates curl git gcc-toolset-14 autoconf \
-                  automake bison cmake flex libtool make pkgconfig re2c \
+                  bash ca-certificates curl git gcc-toolset-13 autoconf \
+                  automake bison cmake flex libtool make pkgconfig \
                   tar xz which
-                . /opt/rh/gcc-toolset-14/enable
+                dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
+                . /opt/rh/gcc-toolset-13/enable
               else
                 apk add --no-cache \
                   bash curl git build-base autoconf automake bison cmake flex \
@@ -141,7 +144,7 @@ jobs:
               fi
 
               # Use native gcc instead of zig-cc. Native gcc links against
-              # the image libc: musl on Alpine, glibc 2.28 on manylinux_2_28.
+              # the image libc: musl on Alpine, glibc 2.28 on almalinux:8.
               export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
               # CRITICAL for gnu builds: the spc env.ini defaults SPC_TARGET to
               # <arch>-linux-musl on Linux, and its libc self-check then aborts
