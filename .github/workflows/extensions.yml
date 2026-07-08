@@ -60,7 +60,7 @@ on:
         default: "igbinary,msgpack,apcu,redis,mongodb"
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc16"
+  SPC_VERSION: "v3.0.0-pgo-rc17"
 
 jobs:
   # Resolve the platform input into a Linux matrix, mirroring build.yml.setup.
