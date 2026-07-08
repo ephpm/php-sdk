@@ -326,9 +326,23 @@ jobs:
       - name: Install Homebrew + build deps via spc doctor
         # NONINTERACTIVE=1 is required so the Homebrew installer doesn't prompt
         # for sudo confirmation (which would hang in CI).
+        # Retried: doctor downloads tool artifacts (pkg-config etc.) and a
+        # transient fetch failure otherwise kills the whole build in the
+        # first seconds (run 28918698346).
         env:
           NONINTERACTIVE: "1"
-        run: spc doctor --auto-fix
+        run: |
+          i=0
+          until spc doctor --auto-fix; do
+            i=$((i + 1))
+            if [ "$i" -ge 5 ]; then
+              echo "spc doctor failed after $i attempts" >&2
+              exit 1
+            fi
+            s=$((RANDOM % 4 + 3))
+            echo "spc doctor flaked (attempt $i), retrying in ${s}s..."
+            sleep "$s"
+          done
 
       # Apple clang crashes on PHP's JIT code (zend_jit_vm_helpers.c, exit 70),
       # so use Homebrew LLVM instead. Doctor's REQUIRED_COMMANDS doesn't
