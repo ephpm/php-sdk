@@ -25,7 +25,7 @@ on:
           - windows-x86_64
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc15"
+  SPC_VERSION: "v3.0.0-pgo-rc16"
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
