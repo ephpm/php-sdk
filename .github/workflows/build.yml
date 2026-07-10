@@ -155,6 +155,22 @@ jobs:
                 export SPC_TARGET="$(uname -m)-linux-gnu"
               fi
 
+              # Hardware-intrinsics fix: the spc fork env.ini puts
+              # -fvisibility-inlines-hidden (a C++-only flag) into
+              # PHP_MAKE_EXTRA_CFLAGS. GCC warns on every C compile, and
+              # php-src AX_GCC_FUNC_ATTRIBUTE treats ANY stderr as
+              # "attribute unsupported", so HAVE_FUNC_ATTRIBUTE_TARGET/IFUNC
+              # end up undefined and PHP silently skips ALL x86 intrinsic
+              # resolvers: SHA-NI sha256 (measured 2.7x slower than it
+              # should be), PCLMUL crc32c (2.2x), and every ZEND_INTRIN_*
+              # path (SSSE3/AVX2 base64 etc.). Upstream spc fixed the flag
+              # placement in May 2026; until the fork rebases onto that,
+              # override here -- env vars win over env.ini. Value = the fork
+              # env.ini line with the one C++-only token removed and
+              # ${SPC_DEFAULT_CFLAGS} pre-expanded (env-provided values skip
+              # the ini ${} interpolation, so it must be spelled out).
+              export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-g -fstack-protector-strong -fno-ident -fPIE -fvisibility=hidden -fPIC -O3 -pipe -fno-plt -fno-semantic-interposition -fstack-clash-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -ffunction-sections -fdata-sections -Wno-unused-command-line-argument"
+
               # Extract spc into a fresh temp dir and PATH it: on the ubuntu
               # image the runner storage/userns combo denied writes into
               # /usr/local/bin during extraction (run 28759904638) even though
@@ -238,6 +254,18 @@ jobs:
                 exit 1
               fi
               cp -RLf "$PHP_INC_DIR" /output/include/php
+
+              # Guard: prove the CFLAGS override above actually re-enabled
+              # the hardware intrinsics. Every Linux SDK before 2026-07
+              # shipped with HAVE_FUNC_ATTRIBUTE_TARGET silently undefined
+              # (no SHA-NI sha256, no PCLMUL crc32, no AVX2 base64) and no
+              # check caught it. x86_64 only: PHP ext/hash has no aarch64
+              # equivalent intrinsics.
+              if [ "$(uname -m)" = "x86_64" ]; then
+                grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h
+                nm /output/lib/libphp.a | grep -q "SHA256_Transform_shani"
+                echo "==> intrinsics guard passed: SHA-NI transform present in libphp.a"
+              fi
 
               # Bundle the container libstdc++.a (musl-flavored on Alpine,
               # glibc-flavored on Ubuntu) so downstream consumers link
