@@ -1,0 +1,165 @@
+name: Watch PHP Releases
+run-name: "Watch php.net for new patch releases"
+
+# Closes the "new PHP patch released upstream" loop automatically. Every 6
+# hours (or on manual dispatch) this:
+#
+#   1. Polls https://www.php.net/releases/active.php for the newest patch of
+#      every minor listed in versions.json.
+#   2. Skips versions whose v<version> release already exists AND is complete
+#      per versions.json `platforms_required`, and versions with a build run
+#      already queued/in progress (matched by run-name "Build PHP X.Y.Z").
+#   3. Refreshes the php-src mirror: downloads the tarball from php.net,
+#      verifies its sha256 against the active.php JSON, and uploads it to the
+#      `php-sources` release tag. This is REQUIRED before dispatching --
+#      build.yml's Linux legs fetch php-src exclusively from that mirror
+#      (fleet egress to php.net is unreliable) and 404 without it. Today this
+#      refresh is a manual chore; this automates it.
+#   4. Dispatches build.yml (platform=all) and extensions.yml for the version.
+#
+# Failure policy: transient problems (php.net fetch flake, mirror-sync race
+# where active.php lists a version whose tarball/sha isn't consistent on the
+# CDN yet) exit 0 quietly -- the next 6h cycle retries. Structural problems
+# (versions.json unparsable, a minor vanished from active.php, GitHub API
+# rejecting writes to our own repo) exit 1 loudly.
+#
+# Cross-repo note: this workflow does NOT notify ephpm. The default
+# GITHUB_TOKEN cannot fire repository_dispatch into another repo; ephpm's
+# daily sdk-bump.yml reconciliation discovers new complete SDKs by polling
+# our releases instead. Direct repository_dispatch wiring (GitHub App token)
+# is Phase 3 plumbing.
+
+on:
+  schedule:
+    # Every 6 hours, offset from the top of the hour to dodge the cron herd.
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write # upload php-src tarballs to the php-sources mirror release
+  actions: write # dispatch build.yml / extensions.yml
+
+concurrency:
+  group: watch-php
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    # ubuntu-latest: hosted-label runs already work in this repo (build.yml's
+    # setup job uses it on every build). If the org ever drops hosted runners,
+    # switch to [self-hosted, linux, x64] -- tradeoff: the watcher then
+    # competes with real build jobs for fleet capacity, and a wedged fleet
+    # also silences the very watcher that should be reporting on it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Poll php.net and reconcile releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+
+          fail() { echo "::error::$*"; exit 1; }
+
+          minors=$(jq -er '.minors[]' versions.json) \
+            || fail "versions.json missing or unparsable (.minors)"
+          required=$(jq -er '.platforms_required[]' versions.json) \
+            || fail "versions.json missing platforms_required"
+
+          # active.php schema (verified live 2026-07-14):
+          #   { "<major>": { "<minor>": { "version": "X.Y.Z",
+          #       "source": [ { "filename": "php-X.Y.Z.tar.gz",
+          #                     "sha256": "..." }, ... ] } } }
+          active=$(curl -fsSL --max-time 60 https://www.php.net/releases/active.php) || {
+            echo "php.net active.php fetch failed (transient -- next cycle retries)"
+            exit 0
+          }
+          echo "$active" | jq -e 'type == "object"' >/dev/null 2>&1 \
+            || fail "active.php did not return a JSON object -- schema change?"
+
+          rc=0
+          for minor in $minors; do
+            major="${minor%%.*}"
+            latest=$(echo "$active" | jq -r --arg M "$major" --arg m "$minor" \
+              '.[$M][$m].version // empty')
+            if [ -z "$latest" ]; then
+              # Structural: an EOL'd minor must be removed from versions.json,
+              # or php.net changed its schema. Either needs a human.
+              echo "::error::minor ${minor} not present in php.net active.php -- EOL or schema change; update versions.json"
+              rc=1
+              continue
+            fi
+            echo "==> ${minor}: newest upstream patch is ${latest}"
+
+            # Idempotency gate 1: release exists and is complete per manifest.
+            assets=$(gh api "repos/${GH_REPO}/releases/tags/v${latest}" \
+              --jq '.assets[].name' 2>/dev/null || true)
+            if [ -n "$assets" ]; then
+              missing=""
+              for plat in $required; do
+                echo "$assets" | grep -qxF "php-sdk-${latest}-${plat}.tar.gz" \
+                  || missing="$missing $plat"
+              done
+              if [ -z "$missing" ]; then
+                echo "    v${latest} exists and is complete -- nothing to do"
+                continue
+              fi
+              echo "    v${latest} exists but is missing:${missing}"
+            else
+              echo "    no v${latest} release yet"
+            fi
+
+            # Idempotency gate 2: a build for this version is already
+            # queued or running (run-name is "Build PHP X.Y.Z").
+            in_flight=$(gh run list --workflow=build.yml \
+              --json displayTitle,status \
+              --jq "[.[] | select(.displayTitle == \"Build PHP ${latest}\"
+                     and (.status == \"queued\" or .status == \"in_progress\"))] | length")
+            if [ "${in_flight:-0}" -gt 0 ]; then
+              echo "    a build for ${latest} is already queued/in_progress -- skipping dispatch"
+              continue
+            fi
+
+            # Mirror refresh: build.yml's Linux legs fetch php-src from our
+            # php-sources release tag, NOT php.net. The tarball must land
+            # there before dispatching or those legs 404.
+            mirror_assets=$(gh release view php-sources --json assets \
+              --jq '.assets[].name' 2>/dev/null) \
+              || fail "php-sources mirror release not found -- it must exist before builds can run"
+            if ! echo "$mirror_assets" | grep -qxF "php-${latest}.tar.gz"; then
+              want_sha=$(echo "$active" | jq -r --arg M "$major" --arg m "$minor" \
+                --arg f "php-${latest}.tar.gz" \
+                '.[$M][$m].source[] | select(.filename == $f) | .sha256 // empty')
+              if [ -z "$want_sha" ]; then
+                echo "    active.php lists ${latest} but no tar.gz sha256 yet (mirror-sync race) -- next cycle retries"
+                continue
+              fi
+              echo "    mirroring php-${latest}.tar.gz to the php-sources release..."
+              if ! curl -fsSL --max-time 600 -o "php-${latest}.tar.gz" \
+                  "https://www.php.net/distributions/php-${latest}.tar.gz"; then
+                echo "    tarball download failed (transient) -- next cycle retries"
+                continue
+              fi
+              got_sha=$(sha256sum "php-${latest}.tar.gz" | awk '{print $1}')
+              if [ "$got_sha" != "$want_sha" ]; then
+                echo "    sha256 mismatch (want ${want_sha}, got ${got_sha}) -- CDN sync race, next cycle retries"
+                rm -f "php-${latest}.tar.gz"
+                continue
+              fi
+              gh release upload php-sources "php-${latest}.tar.gz" --clobber \
+                || fail "uploading php-${latest}.tar.gz to php-sources failed"
+              echo "    mirrored php-${latest}.tar.gz (sha256 verified)"
+            fi
+
+            echo "    dispatching build.yml (platform=all) + extensions.yml for ${latest}"
+            gh workflow run build.yml --ref main \
+              -f "php_version=${latest}" -f platform=all \
+              || fail "dispatching build.yml for ${latest} failed"
+            gh workflow run extensions.yml --ref main \
+              -f "php_version=${latest}" -f platform=all \
+              || fail "dispatching extensions.yml for ${latest} failed"
+          done
+
+          exit "$rc"
