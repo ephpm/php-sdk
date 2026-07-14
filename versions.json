@@ -1,0 +1,14 @@
+{
+  "_comment": "Release-completeness manifest. `platforms_required` are the SDK tarballs ephpm actually consumes (its release matrix hard-depends on them); a v<php_version> release missing any of these is broken. `platforms_optional` (musl) have no known consumers today -- we keep building them but never gate a release on them. build.yml's verify-completeness step and watch-php.yml both read this file.",
+  "minors": ["8.3", "8.4", "8.5"],
+  "platforms_required": [
+    "linux-x86_64-gnu",
+    "linux-aarch64-gnu",
+    "macos-aarch64",
+    "windows-x86_64"
+  ],
+  "platforms_optional": [
+    "linux-x86_64",
+    "linux-aarch64"
+  ]
+}
