@@ -23,6 +23,16 @@ on:
           - linux-aarch64-gnu
           - macos-aarch64
           - windows-x86_64
+      release_tag_suffix:
+        description: "Suffix appended to the release tag (uploads go to
+          v<php_version><suffix>). Test/validation branches MUST set a
+          suffix (e.g. -forktest) so they can never contaminate production
+          tags. Incident 2026-07-13: a validation build dispatched from a
+          side branch uploaded to plain v8.5.7 and overwrote 4 production
+          assets (since restored). Leave empty for production releases."
+        required: false
+        type: string
+        default: ""
 
 env:
   SPC_VERSION: "v3.0.0-pgo-rc17"
@@ -850,9 +860,14 @@ jobs:
         # action-gh-release replaces only assets whose filenames match what
         # we upload. Tarballs for platforms we didn't rebuild stay attached
         # to the existing release tag untouched.
+        #
+        # The tag carries release_tag_suffix so test/validation dispatches
+        # (which MUST set a suffix) upload to their own tag instead of
+        # overwriting production assets (see the input's description for the
+        # 2026-07-13 v8.5.7 incident).
         with:
-          tag_name: v${{ inputs.php_version }}
-          name: PHP ${{ inputs.php_version }}
+          tag_name: v${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
+          name: PHP ${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
           body: |
             Pre-built PHP embed SAPI SDK for ephpm.
 
@@ -870,3 +885,82 @@ jobs:
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
             | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
           files: artifacts/*.tar.gz
+
+      # Completeness gate: compare the assets actually attached to the release
+      # tag against `platforms_required` in versions.json (the tarballs ephpm
+      # hard-depends on; the musl `platforms_optional` entries never gate).
+      #
+      #   - platform=all runs: any missing REQUIRED asset is a hard failure.
+      #     Incident 2026-07-10: v8.4.23 was published with 4/6 assets and
+      #     nobody noticed until a consumer 404'd.
+      #   - single-platform runs: this run's OWN asset missing is a hard
+      #     failure; other still-missing required assets are ::warning only
+      #     (partial uploads are by design).
+      #
+      # Implemented with github-script rather than gh/jq because the release
+      # job runs on a self-hosted runner where neither tool is guaranteed
+      # (see the download-artifact comment above) -- node always exists.
+      - name: Checkout (versions.json for completeness check)
+        uses: actions/checkout@v4
+
+      - name: Verify release completeness
+        uses: actions/github-script@v7
+        env:
+          PHP_VERSION: ${{ inputs.php_version }}
+          RELEASE_TAG: v${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
+          PLATFORM: ${{ inputs.platform }}
+        with:
+          script: |
+            const fs = require('fs');
+            const manifest = JSON.parse(fs.readFileSync('versions.json', 'utf8'));
+            const version = process.env.PHP_VERSION;
+            const tag = process.env.RELEASE_TAG;
+            const platform = process.env.PLATFORM || 'all';
+
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag,
+            });
+            const assets = release.data.assets.map((a) => a.name);
+            core.info(`Assets on ${tag}:\n  ${assets.join('\n  ') || '(none)'}`);
+
+            const assetFor = (p) => `php-sdk-${version}-${p}.tar.gz`;
+            const missingRequired = manifest.platforms_required.filter(
+              (p) => !assets.includes(assetFor(p)),
+            );
+            const missingOptional = manifest.platforms_optional.filter(
+              (p) => !assets.includes(assetFor(p)),
+            );
+            if (missingOptional.length > 0) {
+              core.info(
+                `Optional (musl) assets not present -- informational only: ${missingOptional.join(', ')}`,
+              );
+            }
+
+            if (platform === 'all') {
+              if (missingRequired.length > 0) {
+                core.setFailed(
+                  `release ${tag} is INCOMPLETE -- missing required platform(s): ${missingRequired.join(', ')}. ` +
+                  `Re-dispatch build.yml per missing platform to backfill.`,
+                );
+                return;
+              }
+              core.info(`release ${tag} is complete: all required platforms present.`);
+              return;
+            }
+
+            // Single-platform run: our own tarball must have landed.
+            if (!assets.includes(assetFor(platform))) {
+              core.setFailed(
+                `this run built ${platform} but ${assetFor(platform)} is not attached to ${tag} -- upload failed?`,
+              );
+              return;
+            }
+            core.info(`own asset ${assetFor(platform)} present on ${tag}.`);
+            if (missingRequired.length > 0) {
+              core.warning(
+                `release ${tag} is still missing required platform(s): ${missingRequired.join(', ')} ` +
+                `(not built by this single-platform run).`,
+              );
+            }
