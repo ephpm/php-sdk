@@ -1,0 +1,270 @@
+name: Mirror GNU Dependency Tarballs
+run-name: "Mirror GNU dep tarballs (spc ${{ inputs.spc_version_override || 'pinned' }})"
+
+# Populates the GNU dependency mirror that build.yml and extensions.yml
+# consume.
+#
+# WHY THIS EXISTS
+# Six artifacts in our extension set resolve through spc `type: filelist`
+# sources pointed at https://ftpmirror.gnu.org/gnu/<pkg>/ -- libiconv,
+# gettext, ncurses, libunistring, idn2 and gmp. ftpmirror.gnu.org is a
+# redirector that round-robins to volunteer backend mirrors, and when it
+# lands on a bad one the request returns an HTTP error (curl exit 22).
+# Every one of those six except gmp has NO `source-mirror` fallback in spc,
+# so a single bad backend fails the entire `spc download` and therefore the
+# whole build.
+#
+# That is not hypothetical. From 2026-08-06 onward every scheduled build in
+# this repo died this way -- runs 31069327889, 31069330534 and 31144090886
+# all failed with "Failed artifact: libiconv" after exhausting their
+# retries, on both x86_64 and aarch64, on both musl and gnu, and on macOS.
+# Three PHP versions (8.3.33, 8.4.24, 8.5.9) have no published SDK as a
+# result.
+#
+# THE FIX IS THE ONE ALREADY APPLIED TO php-src
+# build.yml has fetched php-src from our own `php-sources` release tag since
+# July, because "fleet egress to php.net is unreliable" and "pinned tarballs
+# also make builds deterministic". The GNU tarballs are the remaining
+# unmirrored source. This finishes that job rather than inventing a second
+# mechanism: same release tag, same plain-curl prefetch, same
+# `--custom-url` handoff to spc.
+#
+# HOW THE SET IS CHOSEN
+# Not hardcoded. After `spc download`, spc records every resolved artifact
+# in downloads/.cache.json including the source config it used. We select
+# exactly those entries whose source URL is on ftpmirror.gnu.org. If spc
+# adds or drops a GNU-hosted dependency, or the extension set changes, this
+# tracks it automatically.
+#
+# WHY A HOSTED RUNNER, BUT THE FLEET CONTAINER
+# The job runs on ubuntu-latest -- GitHub-hosted egress is the whole point,
+# since the self-hosted fleet is what cannot reach the GNU mirrors reliably.
+# But it runs spc inside the SAME almalinux:8 image with the SAME
+# SPC_TARGET as build.yml, so artifact and version resolution are identical
+# to what the fleet would have picked. A different libc or target could
+# resolve different artifacts.
+#
+# VERSION PINNING IS A DELIBERATE SIDE EFFECT
+# spc `filelist` normally picks the newest tarball in the directory index on
+# every build. Once mirrored, builds get whatever version was current when
+# this workflow last ran, until it is run again. That is the same tradeoff
+# php-src already makes, and it is a feature: builds stop drifting
+# underneath us. Re-run this workflow to take newer dependency versions.
+#
+# HARD RULE (inherited from build.yml, cost 5 failed CI runs)
+# The container step passes its script as a single-quoted `sh -c '...'`. NO
+# apostrophes anywhere inside that block - a stray apostrophe in a comment
+# terminates the quote and the rest silently runs on the runner host.
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: "PHP version to resolve dependencies against. Only
+          selects which artifacts spc downloads; the GNU dep versions
+          themselves do not depend on it."
+        required: false
+        type: string
+        default: "8.4.23"
+      spc_version_override:
+        description: "Override SPC_VERSION. Leave empty to use the pinned
+          version. Must match what build.yml pins, or the mirrored artifact
+          set can diverge from what the builds actually resolve."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Resolve and print the manifest but upload nothing."
+        required: false
+        type: boolean
+        default: false
+
+env:
+  # Keep in lockstep with build.yml and extensions.yml.
+  SPC_VERSION: "v3.0.0-pgo-rc17"
+  PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+  MIRROR_TAG: "php-sources"
+  MANIFEST_NAME: "gnu-deps-manifest.txt"
+
+concurrency:
+  group: mirror-deps
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    name: Resolve and mirror GNU dependency tarballs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve dependencies with spc
+        env:
+          SPC_VERSION_INPUT: ${{ inputs.spc_version_override }}
+          PHP_VERSION: ${{ inputs.php_version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          spc_version="${SPC_VERSION_INPUT:-${{ env.SPC_VERSION }}}"
+          echo "==> using spc ${spc_version}"
+
+          docker run --name spc-mirror \
+            -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            -e SPC_VERSION="${spc_version}" \
+            -e PHP_VERSION="${PHP_VERSION}" \
+            -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
+            docker.io/library/almalinux:8 sh -c '
+              set -eux
+
+              # Same image and package set as build.yml gnu legs, so artifact
+              # resolution matches what the fleet would have picked.
+              dnf install -y dnf-plugins-core epel-release
+              dnf config-manager --set-enabled powertools 2>/dev/null \
+                || dnf config-manager --set-enabled crb 2>/dev/null || true
+              dnf install -y --allowerasing \
+                bash ca-certificates curl git gcc-toolset-13 autoconf \
+                automake bison cmake flex libtool make pkgconfig \
+                tar xz which jq
+              dnf install -y re2c || echo "re2c not packaged; not needed for download only"
+              . /opt/rh/gcc-toolset-13/enable
+
+              export SPC_TOOLCHAIN="StaticPHP\\Toolchain\\GccNativeToolchain"
+              export SPC_TARGET="$(uname -m)-linux-gnu"
+
+              mkdir -p /tmp/spcbin
+              curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${SPC_VERSION}/spc-linux-$(uname -m).tar.gz" \
+                | tar xz --no-same-owner --no-same-permissions -C /tmp/spcbin
+              chmod +x /tmp/spcbin/spc
+              export PATH="/tmp/spcbin:${PATH}"
+
+              mkdir /build && cd /build
+
+              # php-src comes from our own mirror, as everywhere else.
+              j=0
+              until curl -fsSL -o /tmp/php-src-mirror.tar.gz \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"; do
+                j=$((j + 1))
+                if [ "$j" -ge 5 ]; then
+                  echo "mirror fetch failed after $j attempts" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              # This is the step that fails on the fleet. Here it runs with
+              # GitHub-hosted egress and a much longer budget: 10 attempts
+              # with exponential backoff capped at 300s, roughly 20 minutes
+              # of tolerance instead of the 40 seconds the build jobs had.
+              # Getting this to succeed ONCE is enough to unblock every
+              # subsequent build.
+              i=0
+              until spc download \
+                  --with-php=${PHP_VERSION} \
+                  --for-extensions=${PHP_EXTENSIONS} \
+                  --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                  --prefer-pre-built; do
+                i=$((i + 1))
+                if [ "$i" -ge 10 ]; then
+                  echo "spc download failed after $i attempts" >&2
+                  exit 1
+                fi
+                s=$(awk "BEGIN{srand(); b=5*(2^($i-1)); if(b>300)b=300; print int(b)+int(rand()*5)}")
+                echo "spc download flaked (attempt $i), retrying in ${s}s..."
+                sleep "$s"
+              done
+
+              # Select the artifacts spc actually resolved from
+              # ftpmirror.gnu.org. Derived from the spc cache record rather
+              # than a hardcoded list, so it tracks config changes.
+              mkdir -p /output
+              jq -r "
+                to_entries[]
+                | select(.value.source != null)
+                | select((.value.source.config.url // \"\") | test(\"ftpmirror[.]gnu[.]org\"))
+                | \"\(.key) \(.value.source.filename)\"
+              " /build/downloads/.cache.json | sort > /output/manifest.txt
+
+              if [ ! -s /output/manifest.txt ]; then
+                echo "::error::no ftpmirror.gnu.org artifacts found in downloads/.cache.json - did spc change its source config or cache format?" >&2
+                echo "==> cache keys for debugging:" >&2
+                jq -r "keys[]" /build/downloads/.cache.json >&2 || true
+                exit 1
+              fi
+
+              echo "==> resolved GNU-hosted artifacts:"
+              cat /output/manifest.txt
+
+              while read -r dep_name dep_file; do
+                if [ ! -f "/build/downloads/${dep_file}" ]; then
+                  echo "::error::${dep_name} manifest lists ${dep_file} but it is not in downloads/" >&2
+                  exit 1
+                fi
+                # Prove it is a readable archive before we publish it as one.
+                case "${dep_file}" in
+                  *.tar.gz | *.tgz) tar tzf "/build/downloads/${dep_file}" > /dev/null ;;
+                  *.tar.xz) tar tJf "/build/downloads/${dep_file}" > /dev/null ;;
+                  *.tar.bz2) tar tjf "/build/downloads/${dep_file}" > /dev/null ;;
+                  *) echo "::error::unexpected archive type for ${dep_file}" >&2; exit 1 ;;
+                esac
+                cp "/build/downloads/${dep_file}" /output/
+                echo "==> staged ${dep_name} ${dep_file}"
+              done < /output/manifest.txt
+
+              sha256sum /output/*.tar.* > /output/SHA256SUMS
+              cat /output/SHA256SUMS
+            '
+
+          docker cp spc-mirror:/output ./
+          docker rm spc-mirror
+          ls -lh output/
+
+      - name: Upload to the mirror release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+
+          # The manifest is what build.yml reads to know which files to fetch
+          # and what to name them locally. spc derives an artifact local
+          # filename from the URL basename, so the mirrored asset MUST keep
+          # its true upstream filename or extraction picks the wrong format.
+          cp output/manifest.txt "${{ env.MANIFEST_NAME }}"
+
+          gh release view "${{ env.MIRROR_TAG }}" > /dev/null 2>&1 \
+            || { echo "::error::release tag ${{ env.MIRROR_TAG }} does not exist"; exit 1; }
+
+          # Upload tarballs BEFORE the manifest. A consumer that sees the
+          # manifest expects every file in it to be fetchable; publishing the
+          # manifest last means there is never a window where it advertises
+          # an asset that has not landed.
+          for f in output/*.tar.*; do
+            echo "==> uploading $(basename "$f")"
+            gh release upload "${{ env.MIRROR_TAG }}" "$f" --clobber
+          done
+          gh release upload "${{ env.MIRROR_TAG }}" output/SHA256SUMS --clobber
+          gh release upload "${{ env.MIRROR_TAG }}" "${{ env.MANIFEST_NAME }}" --clobber
+
+          echo "==> mirror updated:"
+          cat "${{ env.MANIFEST_NAME }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### GNU dependency mirror"
+            echo
+            if [ -f output/manifest.txt ]; then
+              echo '```'
+              cat output/manifest.txt
+              echo '```'
+            else
+              echo "No manifest produced."
+            fi
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              echo
+              echo "_Dry run - nothing was uploaded._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

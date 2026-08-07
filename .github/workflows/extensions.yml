@@ -180,18 +180,46 @@ jobs:
               # shared catalog. Both must be resolvable or spc download errors.
               # Retry to tolerate transient upstream flakes (pecl, GitHub API).
               ALL_EXTENSIONS="pcre,mbstring,session,openssl,hash,json,filter,${EXTENSIONS}"
+
+              # Same GNU dependency mirror the SDK builds use: libiconv and
+              # friends resolve through ftpmirror.gnu.org, which has no
+              # source-mirror fallback in spc and takes the whole download
+              # down when it serves a bad backend. See build.yml for the full
+              # rationale. Populated by mirror-deps.yml; absent manifest
+              # means fall back to upstream with a warning.
+              CUSTOM_URLS=""
+              mkdir -p /tmp/deps
+              if curl -fsSL -o /tmp/deps/manifest.txt \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/gnu-deps-manifest.txt"; then
+                while read -r dep_name dep_file; do
+                  if [ -z "${dep_name}" ] || [ -z "${dep_file}" ]; then
+                    continue
+                  fi
+                  if curl -fsSL -o "/tmp/deps/${dep_file}" \
+                      "https://github.com/ephpm/php-sdk/releases/download/php-sources/${dep_file}"; then
+                    CUSTOM_URLS="${CUSTOM_URLS} --custom-url=${dep_name}:file:///tmp/deps/${dep_file}"
+                    echo "==> mirrored ${dep_name} as ${dep_file}"
+                  else
+                    echo "::warning::manifest lists ${dep_file} but it did not download; letting spc fetch ${dep_name} upstream"
+                  fi
+                done < /tmp/deps/manifest.txt
+              else
+                echo "::warning::no gnu-deps-manifest.txt on the php-sources release tag - falling back to upstream GNU mirrors, which are the known failure mode. Run mirror-deps.yml to populate it."
+              fi
+
               i=0
               until spc download \
                   --with-php=${PHP_VERSION} \
                   --for-extensions=${ALL_EXTENSIONS} \
                   --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                  ${CUSTOM_URLS} \
                   --prefer-pre-built; do
                 i=$((i + 1))
-                if [ "$i" -ge 6 ]; then
+                if [ "$i" -ge 8 ]; then
                   echo "spc download failed after $i attempts" >&2
                   exit 1
                 fi
-                s=$(awk "BEGIN{srand(); print 2+int(rand()*2)}")
+                s=$(awk "BEGIN{srand(); b=5*(2^($i-1)); if(b>300)b=300; print int(b)+int(rand()*5)}")
                 echo "spc download flaked (attempt $i), retrying in ${s}s..."
                 sleep "$s"
               done

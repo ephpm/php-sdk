@@ -205,8 +205,12 @@ jobs:
 
               mkdir /build && cd /build
               # Retry spc download to tolerate transient upstream flakes
-              # (gnu.org libiconv mirror, pecl.php.net, GitHub API rate
-              # limits). Up to 6 attempts with 2-3s jitter between (~15s).
+              # (pecl.php.net, GitHub API rate limits). Up to 8 attempts with
+              # exponential backoff capped at 300s, about 10 minutes total.
+              # It used to be 6 attempts with 2-3s jitter, roughly 40 seconds
+              # of tolerance, which is nothing against an outage measured in
+              # hours: every scheduled build from 2026-08-06 onward burned
+              # through all 6 attempts in under a minute and failed.
               # php-src comes from our own GitHub mirror (release tag
               # "php-sources"): fleet egress to php.net is
               # unreliable (release-info API refused every attempt on
@@ -227,18 +231,57 @@ jobs:
                 fi
                 sleep 3
               done
+
+              # GNU dependency mirror. Six artifacts in our extension set
+              # resolve through spc filelist sources pointed at
+              # ftpmirror.gnu.org, which round-robins to volunteer backend
+              # mirrors and returns an HTTP error when it picks a bad one.
+              # Five of the six (libiconv, gettext, ncurses, libunistring,
+              # idn2) have NO source-mirror fallback in spc, so one bad
+              # backend fails the whole download and therefore the build.
+              # That killed every scheduled build from 2026-08-06 onward.
+              # Fetch them from our own release tag instead, exactly as
+              # php-src already is, and hand spc file:// custom-urls.
+              # Populated by mirror-deps.yml.
+              #
+              # If the manifest is absent the mirror has not been populated
+              # yet: warn loudly and let spc fetch upstream, which is the
+              # pre-mirror behavior. Failing here instead would turn a
+              # missing mirror into a broken build, which is the opposite of
+              # the point.
+              CUSTOM_URLS=""
+              mkdir -p /tmp/deps
+              if curl -fsSL -o /tmp/deps/manifest.txt \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/gnu-deps-manifest.txt"; then
+                while read -r dep_name dep_file; do
+                  if [ -z "${dep_name}" ] || [ -z "${dep_file}" ]; then
+                    continue
+                  fi
+                  if curl -fsSL -o "/tmp/deps/${dep_file}" \
+                      "https://github.com/ephpm/php-sdk/releases/download/php-sources/${dep_file}"; then
+                    CUSTOM_URLS="${CUSTOM_URLS} --custom-url=${dep_name}:file:///tmp/deps/${dep_file}"
+                    echo "==> mirrored ${dep_name} as ${dep_file}"
+                  else
+                    echo "::warning::manifest lists ${dep_file} but it did not download; letting spc fetch ${dep_name} upstream"
+                  fi
+                done < /tmp/deps/manifest.txt
+              else
+                echo "::warning::no gnu-deps-manifest.txt on the php-sources release tag - falling back to upstream GNU mirrors, which are the known failure mode. Run mirror-deps.yml to populate it."
+              fi
+
               i=0
               until spc download \
                   --with-php=${PHP_VERSION} \
                   --for-extensions=${PHP_EXTENSIONS} \
                   --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                  ${CUSTOM_URLS} \
                   --prefer-pre-built; do
                 i=$((i + 1))
-                if [ "$i" -ge 6 ]; then
+                if [ "$i" -ge 8 ]; then
                   echo "spc download failed after $i attempts" >&2
                   exit 1
                 fi
-                s=$(awk "BEGIN{srand(); print 2+int(rand()*2)}")
+                s=$(awk "BEGIN{srand(); b=5*(2^($i-1)); if(b>300)b=300; print int(b)+int(rand()*5)}")
                 echo "spc download flaked (attempt $i), retrying in ${s}s..."
                 sleep "$s"
               done
@@ -402,18 +445,45 @@ jobs:
 
       - name: Download PHP sources
         # Retry to tolerate transient upstream flakes (see linux build).
+        # The macOS runner hits the same GNU mirror failures as the Linux
+        # fleet — run 31069330534 died here on libiconv — so it consumes the
+        # same dependency mirror. See the linux build for the full rationale.
         run: |
+          CUSTOM_URLS=""
+          mkdir -p /tmp/deps
+          if curl -fsSL -o /tmp/deps/manifest.txt \
+              "https://github.com/ephpm/php-sdk/releases/download/php-sources/gnu-deps-manifest.txt"; then
+            while read -r dep_name dep_file; do
+              if [ -z "${dep_name}" ] || [ -z "${dep_file}" ]; then
+                continue
+              fi
+              if curl -fsSL -o "/tmp/deps/${dep_file}" \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/${dep_file}"; then
+                CUSTOM_URLS="${CUSTOM_URLS} --custom-url=${dep_name}:file:///tmp/deps/${dep_file}"
+                echo "==> mirrored ${dep_name} as ${dep_file}"
+              else
+                echo "::warning::manifest lists ${dep_file} but it did not download; letting spc fetch ${dep_name} upstream"
+              fi
+            done < /tmp/deps/manifest.txt
+          else
+            echo "::warning::no gnu-deps-manifest.txt on the php-sources release tag - falling back to upstream GNU mirrors, which are the known failure mode. Run mirror-deps.yml to populate it."
+          fi
+
           i=0
+          # shellcheck disable=SC2086 # CUSTOM_URLS must word-split into one
+          # --custom-url= argument per mirrored dependency; quoting it would
+          # pass the whole list as a single argument.
           until spc download \
               --with-php=${{ inputs.php_version }} \
               --for-extensions=${{ env.PHP_EXTENSIONS }} \
+              ${CUSTOM_URLS} \
               --prefer-pre-built; do
             i=$((i + 1))
-            if [ "$i" -ge 6 ]; then
+            if [ "$i" -ge 8 ]; then
               echo "spc download failed after $i attempts" >&2
               exit 1
             fi
-            s=$((RANDOM % 2 + 2))
+            s=$(awk "BEGIN{srand(); b=5*(2^($i-1)); if(b>300)b=300; print int(b)+int(rand()*5)}")
             echo "spc download flaked (attempt $i), retrying in ${s}s..."
             sleep "$s"
           done
