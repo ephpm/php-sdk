@@ -778,20 +778,72 @@ jobs:
 
       - name: Download PHP sources
         shell: powershell
-        # Retry to tolerate transient upstream flakes (see linux build).
+        # This leg fails on transient api.github.com release-metadata lookups
+        # ("Failed to get GitHub release API info for <repo>"), not on the GNU
+        # mirrors the Linux/macOS legs work around -- none of the mirrored GNU
+        # tarballs (gettext, idn2, libiconv, libunistring, ncurses) are in the
+        # Windows artifact set, which uses gettext-win/libiconv-win from git.
+        # So there is deliberately no CUSTOM_URLS block here.
+        #
+        # It is NOT a network or rate-limit problem either. A -vv run
+        # (31280535015) showed curl exiting 0 with the token accepted, and no
+        # "[CURL ERROR]" line -- so spc threw from its !is_array($data) branch,
+        # meaning the response body it captured was not valid JSON. The cause
+        # is a truncated-capture race in spc's Shell::passthru(): on Windows it
+        # opens stdout/stderr as ['socket'] descriptors in non-blocking mode,
+        # and once proc_get_status() reports the child has exited it drains
+        # with `while (($chunk = fread($pipe, 8192)) !== false && $chunk !== '')`.
+        # A non-blocking read returns '' on a momentary gap, so the drain can
+        # stop before the tail arrives and the JSON is cut short.
+        #
+        # That predicts failures scale with response size, which matches: it
+        # only ever hits the large release listings (openssl ~364KB, ngtcp2
+        # ~602KB, zstd ~601KB, xz ~387KB) and never the small ones (libssh2
+        # ~88KB, oniguruma ~129KB). Unix uses ['pipe','w'] and is unaffected,
+        # which is why only this leg fails.
+        #
+        # The real fix is upstream in the spc fork (drain until feof, or make
+        # the final read blocking); filed separately. Until an rc lands, retry:
+        # each attempt re-runs spc, which skips already-downloaded artifacts,
+        # so every attempt makes forward progress through the list.
+        #
+        # 50 attempts is deliberate margin, not a guess. In 31280535015
+        # openssl cleared in 2 tries and ngtcp2 in 5, so a large artifact
+        # costs ~2-5 attempts and roughly half a dozen remain. A budget that
+        # only just covers the estimate is what made this a coin flip in the
+        # first place. Attempts are cheap (~10-20s) and the loop exits on the
+        # first success, so the ceiling is only paid when it is needed.
+        #
+        # Backoff is deliberately SHORT. This is a local race, not a remote
+        # limit -- waiting does not improve the next attempt's odds, it just
+        # burns the budget. The previous exponential-to-300s version spent ~10
+        # minutes mostly sleeping and cleared only two artifacts.
+        #
+        # --retry 3 is kept for the actual tarball downloads (genuine network
+        # flakes); it cannot help the API calls, since curl already exits 0.
+        #
+        # Final attempt runs at -vv so a regression is diagnosable.
         run: |
-          $max = 6
+          $max = 50
           for ($i = 1; $i -le $max; $i++) {
-            spc download `
-              --with-php=${{ inputs.php_version }} `
-              --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
-              --prefer-pre-built
+            # Array + splat, not a backtick-continued line: appending a $null
+            # arg to a native command in PowerShell 5.1 passes an empty string
+            # rather than dropping it, and Symfony Console rejects that.
+            $spcArgs = @(
+              'download',
+              '--with-php=${{ inputs.php_version }}',
+              '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
+              '--retry=3',
+              '--prefer-pre-built'
+            )
+            if ($i -eq $max) { $spcArgs += '-vv' }
+            spc @spcArgs
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq $max) {
               Write-Error "spc download failed after $max attempts"
               exit 1
             }
-            $s = Get-Random -Minimum 2 -Maximum 4
+            $s = Get-Random -Minimum 3 -Maximum 7
             Write-Host "spc download flaked (attempt $i), retrying in ${s}s..."
             Start-Sleep -Seconds $s
           }
