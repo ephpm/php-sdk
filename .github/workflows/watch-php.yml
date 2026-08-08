@@ -79,6 +79,11 @@ jobs:
           echo "$active" | jq -e 'type == "object"' >/dev/null 2>&1 \
             || fail "active.php did not return a JSON object -- schema change?"
 
+          # Persisted for the NTS reconciliation step below, which needs the
+          # same version data. Written only after the schema check so the
+          # next step can treat its existence as "active.php was good".
+          printf '%s' "$active" > active.json
+
           rc=0
           for minor in $minors; do
             major="${minor%%.*}"
@@ -163,3 +168,83 @@ jobs:
           done
 
           exit "$rc"
+
+      # NTS tarballs are not part of build.yml's platform=all and never gate
+      # a release, so the loop above never dispatches them. This is their own
+      # reconciliation pass, kept in a separate step so the ephpm-critical
+      # logic above is untouched.
+      #
+      # Nothing here is fatal. A missing NTS tarball inconveniences a
+      # downstream consumer; it must never turn this watcher red or block an
+      # ephpm release.
+      #
+      # Dispatch gate reuses build.yml's run-name ("Build PHP X.Y.Z"), which
+      # does not distinguish platforms. So an in-flight build of ANY platform
+      # for that version defers NTS by one 6h cycle. That is deliberate: it
+      # costs a cycle but cannot produce a dispatch/cancel loop against
+      # build.yml's cancel-in-progress concurrency group.
+      - name: Reconcile NTS builds
+        if: success() && hashFiles('active.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+
+          minors=$(jq -r '.minors_nts[]? // empty' versions.json 2>/dev/null || true)
+          plats=$(jq -r '.platforms_nts[]? // empty' versions.json 2>/dev/null || true)
+          if [ -z "$minors" ] || [ -z "$plats" ]; then
+            echo "no minors_nts / platforms_nts configured -- nothing to do"
+            exit 0
+          fi
+
+          for minor in $minors; do
+            major="${minor%%.*}"
+            latest=$(jq -r --arg M "$major" --arg m "$minor" \
+              '.[$M][$m].version // empty' active.json)
+            if [ -z "$latest" ]; then
+              echo "::warning::minor ${minor} is in minors_nts but not in php.net active.php -- skipping NTS"
+              continue
+            fi
+
+            assets=$(gh api "repos/${GH_REPO}/releases/tags/v${latest}" \
+              --jq '.assets[].name' 2>/dev/null || true)
+            missing=""
+            for plat in $plats; do
+              echo "$assets" | grep -qxF "php-sdk-${latest}-${plat}.tar.gz" \
+                || missing="$missing $plat"
+            done
+            if [ -z "$missing" ]; then
+              echo "==> ${latest}: NTS tarballs present -- nothing to do"
+              continue
+            fi
+            echo "==> ${latest}: NTS missing:${missing}"
+
+            # build.yml Linux legs fetch php-src only from the php-sources
+            # mirror. The ZTS build for this version already refreshed it;
+            # if it somehow has not, wait rather than dispatch a guaranteed
+            # 404.
+            mirror_assets=$(gh release view php-sources --json assets \
+              --jq '.assets[].name' 2>/dev/null || true)
+            if ! echo "$mirror_assets" | grep -qxF "php-${latest}.tar.gz"; then
+              echo "    php-${latest}.tar.gz not on the php-sources mirror yet -- next cycle"
+              continue
+            fi
+
+            in_flight=$(gh run list --workflow=build.yml \
+              --json displayTitle,status \
+              --jq "[.[] | select(.displayTitle == \"Build PHP ${latest}\"
+                     and (.status == \"queued\" or .status == \"in_progress\"))] | length" \
+              2>/dev/null || echo 0)
+            if [ "${in_flight:-0}" -gt 0 ]; then
+              echo "    a build for ${latest} is queued/in_progress -- deferring NTS a cycle"
+              continue
+            fi
+
+            for plat in $missing; do
+              echo "    dispatching build.yml platform=${plat} for ${latest}"
+              gh workflow run build.yml --ref main \
+                -f "php_version=${latest}" -f "platform=${plat}" \
+                || echo "::warning::dispatching ${plat} for ${latest} failed -- next cycle retries"
+            done
+          done

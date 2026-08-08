@@ -11,7 +11,9 @@ on:
       platform:
         description: "Which platform(s) to build. Partial builds upload the
           new tarball to the existing release; tarballs for unbuilt
-          platforms stay put."
+          platforms stay put. The -nts entries build a non-thread-safe
+          embed SDK and are deliberately NOT part of `all` (see the
+          build-linux matrix comment)."
         required: false
         type: choice
         default: all
@@ -21,6 +23,8 @@ on:
           - linux-aarch64
           - linux-x86_64-gnu
           - linux-aarch64-gnu
+          - linux-x86_64-gnu-nts
+          - linux-aarch64-gnu-nts
           - macos-aarch64
           - windows-x86_64
       release_tag_suffix:
@@ -45,7 +49,23 @@ env:
   # Without it, mb_split()/mb_ereg*() are undefined — which breaks Laravel's
   # Str::studly() and any framework using the mbstring regex functions. Keep
   # `mbregex` in BOTH lists alongside `mbstring`.
-  PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,simplexml,soap,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+  #
+  # NOTE on shmop/sockets: added for downstream consumers that ship them
+  # (PAM's reviewed extension surface). They are NOT in WIN_PHP_EXTENSIONS —
+  # PHP supports both on Windows, but neither has ever been through spc's
+  # Windows toolchain here and the Windows leg is the longest and most
+  # fragile in this workflow. Validate with a `release_tag_suffix` dispatch
+  # before adding them there.
+  #
+  # NOTE on ffi: deliberately absent. spc's ext-ffi passes
+  # `--enable-zend-signals`, and its extension args land AFTER the target
+  # args on the configure line (src/Package/Target/php/unix.php builds
+  # "{$cmd} {$args} {$static_extension_str}"), so it would override the
+  # `--enable-zts --disable-zend-signals` that spc emits for ZTS builds —
+  # silently flipping Zend signals on in the SDK ephpm links. ffi is added
+  # only to the NTS matrix entries, where no --disable-zend-signals is
+  # emitted in the first place.
+  PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,gmp,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pcre,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,session,shmop,simplexml,soap,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
 
 # Supersede stale builds: a new dispatch for the same version+platform cancels
 # an older still-queued/running one. Keyed on php_version AND platform so
@@ -87,19 +107,44 @@ jobs:
           # means a 2.28-floored consumer binary runs on RHEL8/AlmaLinux8,
           # Ubuntu 20.04+, Debian 10+, Amazon Linux 2023, Fedora 40+.
           # "suffix" is appended to the tarball / artifact name ("" keeps the
-          # legacy musl names).
-          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","x64"]}'
-          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","runner":["self-hosted","linux","arm64"]}'
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
+          # legacy musl names). "zts" selects --enable-zts. "extra" is
+          # appended verbatim to PHP_EXTENSIONS. "variant" is the docker
+          # container name discriminator (must be unique per matrix entry
+          # that can land on the same runner).
+          #
+          # ZTS IS THE UNSUFFIXED DEFAULT AND MUST STAY THAT WAY. ephpm's
+          # xtask builds the asset name as
+          # php-sdk-{version}-{os}-{arch}{suffix}.tar.gz literally and never
+          # globs, and its SDK cache directory matches. Renaming an existing
+          # tarball breaks ephpm at both download and cache resolution. New
+          # flavors get a NEW suffix; existing names are never touched.
+          #
+          # The -nts entries are NOT in `all`, on purpose. build-linux is one
+          # job with a matrix, and the release job gates on
+          # needs.build-linux.result != 'failure' — so a failing NTS leg
+          # inside `all` would take the whole release down with it. NTS is
+          # dispatched explicitly (or by watch-php.yml, which dispatches it
+          # as its own platform run) and can fail on its own.
+          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","x64"]}'
+          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","arm64"]}'
+          # NTS, glibc only. ffi rides along here rather than in the shared
+          # PHP_EXTENSIONS because its --enable-zend-signals would override
+          # the --disable-zend-signals spc emits for ZTS builds (see the
+          # PHP_EXTENSIONS comment at the top of this file).
+          nts_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","x64"]}'
+          nts_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
-            all)                lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
-            linux-x86_64)       lm="[$musl_x64]"; mac=false; win=false ;;
-            linux-aarch64)      lm="[$musl_arm]"; mac=false; win=false ;;
-            linux-x86_64-gnu)   lm="[$gnu_x64]";  mac=false; win=false ;;
-            linux-aarch64-gnu)  lm="[$gnu_arm]";  mac=false; win=false ;;
-            macos-aarch64)      lm='[]';          mac=true;  win=false ;;
-            windows-x86_64)     lm='[]';          mac=false; win=true ;;
+            all)                    lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
+            linux-x86_64)           lm="[$musl_x64]"; mac=false; win=false ;;
+            linux-aarch64)          lm="[$musl_arm]"; mac=false; win=false ;;
+            linux-x86_64-gnu)       lm="[$gnu_x64]";  mac=false; win=false ;;
+            linux-aarch64-gnu)      lm="[$gnu_arm]";  mac=false; win=false ;;
+            linux-x86_64-gnu-nts)   lm="[$nts_x64]";  mac=false; win=false ;;
+            linux-aarch64-gnu-nts)  lm="[$nts_arm]";  mac=false; win=false ;;
+            macos-aarch64)          lm='[]';          mac=true;  win=false ;;
+            windows-x86_64)         lm='[]';          mac=false; win=true ;;
             *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
           esac
           echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
@@ -107,7 +152,7 @@ jobs:
           echo "build-windows=$win" >> "$GITHUB_OUTPUT"
 
   build-linux:
-    name: Linux (${{ matrix.arch }}, ${{ matrix.libc }})
+    name: Linux (${{ matrix.arch }}, ${{ matrix.variant }})
     needs: setup
     if: needs.setup.outputs.linux-matrix != '[]'
     runs-on: ${{ matrix.runner }}
@@ -116,10 +161,19 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.setup.outputs.linux-matrix) }}
     steps:
+      # Checked out into a subdirectory on purpose: actions/checkout only
+      # manages the path it is given, so spc's caches and this job's own
+      # output/ and sdk/ directories in the workspace root are untouched.
+      # Only tools/mk-sdk-metadata.sh is used from it, in Package SDK.
+      - name: Checkout build tools
+        uses: actions/checkout@v4
+        with:
+          path: sdk-tools
+
       - name: Clean up previous builds
         run: |
           rm -rf output sdk *.tar.gz
-          docker rm -f "spc-build-${{ matrix.libc }}" 2>/dev/null || true
+          docker rm -f "spc-build-${{ matrix.variant }}" 2>/dev/null || true
 
       - name: Build inside container (${{ matrix.libc }})
         # The container image decides the libc flavor: alpine (musl, the
@@ -127,12 +181,13 @@ jobs:
         # ephpm's dynamic Linux binaries link so PHP can dlopen shared
         # extensions at runtime). Same spc invocation either way.
         run: |
-          docker run --name "spc-build-${{ matrix.libc }}" \
+          docker run --name "spc-build-${{ matrix.variant }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
-            -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}" \
+            -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}${{ matrix.extra }}" \
             -e LIBC="${{ matrix.libc }}" \
+            -e ENABLE_ZTS="${{ matrix.zts }}" \
             "${{ matrix.image }}" sh -c '
               set -eux
 
@@ -296,10 +351,22 @@ jobs:
               # tarballs until the version guard below caught it).
               # NOTE: this comment lives inside a single-quoted sh -c
               # block; apostrophes here would terminate the string.
+              #
+              # ENABLE_ZTS=0 drops --enable-zts, which is what makes the
+              # -gnu-nts tarball non-thread-safe. spc gates cleanly on the
+              # flag: src/Package/Target/php/unix.php only emits
+              # --enable-zts --disable-zend-signals (and
+              # --enable-zend-max-execution-timers) when the build option is
+              # set, so an NTS run gets stock PHP defaults instead.
+              ZTS_FLAG=""
+              if [ "$ENABLE_ZTS" = "1" ]; then
+                ZTS_FLAG="--enable-zts"
+              fi
+
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${PHP_VERSION} \
                 --build-embed \
-                --enable-zts \
+                ${ZTS_FLAG} \
                 --no-strip \
                 --debug
 
@@ -317,6 +384,23 @@ jobs:
                 exit 1
               fi
               cp -RLf "$PHP_INC_DIR" /output/include/php
+
+              # Guard: the thread-safety of what we built must match the
+              # matrix entry, because the tarball SUFFIX is what tells
+              # consumers apart and nothing downstream re-checks. A ZTS
+              # tarball published under -gnu-nts (or the reverse) would fail
+              # at dlopen or link time in the consumer, far from here.
+              # php_config.h defines ZTS to 1 only for thread-safe builds.
+              if [ "$ENABLE_ZTS" = "1" ]; then
+                grep -q "define ZTS 1" /output/include/php/main/php_config.h
+                echo "==> ZTS guard passed: thread-safe build as expected"
+              else
+                if grep -q "define ZTS 1" /output/include/php/main/php_config.h; then
+                  echo "::error::asked for a non-thread-safe build but php_config.h defines ZTS 1" >&2
+                  exit 1
+                fi
+                echo "==> ZTS guard passed: non-thread-safe build as expected"
+              fi
 
               # Guard: prove the CFLAGS override above actually re-enabled
               # the hardware intrinsics. Every Linux SDK before 2026-07
@@ -355,8 +439,8 @@ jobs:
           # form — observed to leave the source dir nested inside the
           # destination on some runner Docker versions, producing
           # ./lib/lib/*.a in the final tarball.
-          docker cp "spc-build-${{ matrix.libc }}:/output" ./
-          docker rm "spc-build-${{ matrix.libc }}"
+          docker cp "spc-build-${{ matrix.variant }}:/output" ./
+          docker rm "spc-build-${{ matrix.variant }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -377,6 +461,12 @@ jobs:
             exit 1
           fi
           echo "==> Version guard OK: staged PHP ${staged}"
+
+          # Adds bin/php-config (relocatable shim) and THIRD-PARTY-NOTICES.txt
+          # to the staged tree. The script self-checks the shim before
+          # returning, so a broken shim fails the build here rather than in a
+          # consumer.
+          sh sdk-tools/tools/mk-sdk-metadata.sh sdk linux
 
           tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz -C sdk .
 
@@ -399,6 +489,13 @@ jobs:
             runner: [self-hosted, macos, arm64]
             spc_arch: aarch64
     steps:
+      # Subdirectory checkout so spc's downloads/ and buildroot/ caches in
+      # the workspace root are untouched (see build-linux).
+      - name: Checkout build tools
+        uses: actions/checkout@v4
+        with:
+          path: sdk-tools
+
       # spc on macOS is a self-contained micro-PHP binary (same as Windows
       # spc.exe), so no host PHP install is needed. The runner image is bare,
       # so we let `spc doctor --auto-fix` install Homebrew and the build deps
@@ -529,6 +626,10 @@ jobs:
           fi
           echo "==> Version guard OK: staged PHP ${staged}"
 
+          # bin/php-config + THIRD-PARTY-NOTICES.txt (see the linux job).
+          # The macos flavor emits no --start-group in --libs: ld64 rejects it.
+          sh sdk-tools/tools/mk-sdk-metadata.sh sdk macos
+
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -585,6 +686,14 @@ jobs:
           }
           "$gitRoot\cmd" | Out-File -Append -FilePath $env:GITHUB_PATH
           "$gitRoot\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      # After the Git install so tools/mk-sdk-metadata.sh has a bash to run
+      # under in Package SDK. Subdirectory checkout: the workspace root holds
+      # spc's buildroot/source/downloads and must not be touched.
+      - name: Checkout build tools
+        uses: actions/checkout@v4
+        with:
+          path: sdk-tools
 
       - name: Install Visual Studio Build Tools
         shell: powershell
@@ -895,6 +1004,15 @@ jobs:
           }
           Write-Host "==> Version guard OK: staged PHP $staged"
 
+          # THIRD-PARTY-NOTICES.txt. No bin/php-config on Windows: it is a
+          # POSIX shell script and nothing in the MSVC toolchain consumes
+          # one. bash comes from the PortableGit install above.
+          bash sdk-tools/tools/mk-sdk-metadata.sh sdk windows
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "mk-sdk-metadata.sh failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
           tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz -C sdk .
 
       - name: Upload artifact
@@ -954,6 +1072,17 @@ jobs:
             | `php-sdk-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc, floor 2.28) |
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
             | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
+
+            All of the above are thread-safe (ZTS). A non-thread-safe variant
+            (`-gnu-nts`, Linux glibc only, extension set plus `ffi`) is built
+            on demand for consumers that need one; it is not part of every
+            release and is not required for a release to be considered
+            complete. Check the asset list above for whether this release has
+            one.
+
+            Each tarball contains `lib/`, `include/php/`,
+            `THIRD-PARTY-NOTICES.txt`, and — on Linux and macOS — a
+            relocatable `bin/php-config`.
           files: artifacts/*.tar.gz
 
       # Completeness gate: compare the assets actually attached to the release
