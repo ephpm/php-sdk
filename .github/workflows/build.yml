@@ -39,7 +39,15 @@ on:
         default: ""
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc17"
+  SPC_VERSION: "v3.0.0-pgo-rc18"
+  # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
+  # rejects SAPI names it doesn't know, so embed-based runtimes get
+  # opcache_get_status() === false even with opcache.enable=1. The spc fork
+  # patches the list at build time from this comma-separated env var
+  # (src/Package/Extension/opcache.php, since rc18). Unset defaults to
+  # "ephpm" alone; "embed" is added for consumers embedding libphp under the
+  # stock embed SAPI name (PAM).
+  SPC_OPCACHE_EXTRA_SAPIS: "ephpm,embed"
   # Linux + macOS extension set (sorted, including Unix-only IPC + process
   # control extensions). Windows uses WIN_PHP_EXTENSIONS — keep the two
   # in sync EXCEPT for the Unix-only entries (pcntl, posix, sysv*).
@@ -188,6 +196,7 @@ jobs:
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}${{ matrix.extra }}" \
             -e LIBC="${{ matrix.libc }}" \
             -e ENABLE_ZTS="${{ matrix.zts }}" \
+            -e SPC_OPCACHE_EXTRA_SAPIS="${{ env.SPC_OPCACHE_EXTRA_SAPIS }}" \
             "${{ matrix.image }}" sh -c '
               set -eux
 
@@ -778,20 +787,51 @@ jobs:
 
       - name: Download PHP sources
         shell: powershell
-        # Retry to tolerate transient upstream flakes (see linux build).
+        # This leg used to fail on "Failed to get GitHub release API info for
+        # <repo>" -- a truncated-capture race in spc's Shell::passthru() on
+        # Windows (non-blocking socket drain stopped before the tail of large
+        # API responses arrived; curl itself exited 0). Root-caused via a -vv
+        # run (31280535015), fixed upstream in the spc fork (issue #3 there,
+        # drain to real EOF), shipped in v3.0.0-pgo-rc18.
+        #
+        # Note this was never the GNU-mirror problem the Linux/macOS legs work
+        # around: none of the mirrored tarballs (gettext, idn2, libiconv,
+        # libunistring, ncurses) are in the Windows artifact set, which uses
+        # gettext-win/libiconv-win from git. So no CUSTOM_URLS block here.
+        #
+        # The 50-attempt budget was sized for the rc17 race (~2-5 attempts per
+        # large artifact, cleared on attempt 4 of 50 in 31281980458). rc18
+        # ships the upstream fix, after which this loop should be a formality
+        # -- but the rc18 Windows leg has not run yet (the Windows runner
+        # fleet was down when rc18 landed), so the budget stays at 50 until a
+        # green Windows run on rc18 proves the fix in practice. Then it can
+        # shrink to ~3. If a run burns many attempts on rc18+, the upstream
+        # fix has regressed: check the -vv output of the final attempt, which
+        # logs the curl exit code spc otherwise discards.
+        #
+        # --retry 3 gives the artifact downloads curl-level retries (spc's
+        # default is 0, single-shot).
         run: |
-          $max = 6
+          $max = 50
           for ($i = 1; $i -le $max; $i++) {
-            spc download `
-              --with-php=${{ inputs.php_version }} `
-              --for-extensions=${{ env.WIN_PHP_EXTENSIONS }} `
-              --prefer-pre-built
+            # Array + splat, not a backtick-continued line: appending a $null
+            # arg to a native command in PowerShell 5.1 passes an empty string
+            # rather than dropping it, and Symfony Console rejects that.
+            $spcArgs = @(
+              'download',
+              '--with-php=${{ inputs.php_version }}',
+              '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
+              '--retry=3',
+              '--prefer-pre-built'
+            )
+            if ($i -eq $max) { $spcArgs += '-vv' }
+            spc @spcArgs
             if ($LASTEXITCODE -eq 0) { break }
             if ($i -eq $max) {
               Write-Error "spc download failed after $max attempts"
               exit 1
             }
-            $s = Get-Random -Minimum 2 -Maximum 4
+            $s = Get-Random -Minimum 3 -Maximum 7
             Write-Host "spc download flaked (attempt $i), retrying in ${s}s..."
             Start-Sleep -Seconds $s
           }
