@@ -799,17 +799,20 @@ jobs:
         # libunistring, ncurses) are in the Windows artifact set, which uses
         # gettext-win/libiconv-win from git. So no CUSTOM_URLS block here.
         #
-        # The loop is now a small safety margin for genuine transient flakes,
-        # not a workaround: on rc17 the race consumed ~2-5 attempts per large
-        # artifact and needed a 50-attempt budget (cleared on attempt 4 in
-        # 31281980458). If this step starts exhausting 3 attempts again, the
-        # upstream fix has regressed -- check the -vv output of the final
-        # attempt, which logs the curl exit code spc otherwise discards.
+        # The 50-attempt budget was sized for the rc17 race (~2-5 attempts per
+        # large artifact, cleared on attempt 4 of 50 in 31281980458). rc18
+        # ships the upstream fix, after which this loop should be a formality
+        # -- but the rc18 Windows leg has not run yet (the Windows runner
+        # fleet was down when rc18 landed), so the budget stays at 50 until a
+        # green Windows run on rc18 proves the fix in practice. Then it can
+        # shrink to ~3. If a run burns many attempts on rc18+, the upstream
+        # fix has regressed: check the -vv output of the final attempt, which
+        # logs the curl exit code spc otherwise discards.
         #
         # --retry 3 gives the artifact downloads curl-level retries (spc's
         # default is 0, single-shot).
         run: |
-          $max = 3
+          $max = 50
           for ($i = 1; $i -le $max; $i++) {
             # Array + splat, not a backtick-continued line: appending a $null
             # arg to a native command in PowerShell 5.1 passes an empty string
