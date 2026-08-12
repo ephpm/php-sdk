@@ -13,7 +13,9 @@
   ],
   "platforms_nts": [
     "linux-x86_64-gnu-nts",
-    "linux-aarch64-gnu-nts"
+    "linux-aarch64-gnu-nts",
+    "linux-x86_64-gnu-nts-shared",
+    "linux-aarch64-gnu-nts-shared"
   ],
   "minors_nts": ["8.4"]
 }
