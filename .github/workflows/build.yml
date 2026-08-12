@@ -25,6 +25,8 @@ on:
           - linux-aarch64-gnu
           - linux-x86_64-gnu-nts
           - linux-aarch64-gnu-nts
+          - linux-x86_64-gnu-nts-shared
+          - linux-aarch64-gnu-nts-shared
           - macos-aarch64
           - windows-x86_64
       release_tag_suffix:
@@ -143,6 +145,14 @@ jobs:
           # PHP_EXTENSIONS comment at the top of this file).
           nts_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","x64"]}'
           nts_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","arm64"]}'
+          # Shared-embed NTS: same toolchain and extension set as -gnu-nts,
+          # but SPC_CMD_VAR_PHP_EMBED_TYPE=shared (the "embed" field, read by
+          # the container script) makes spc produce lib/libphp.so with all
+          # dependencies statically linked inside, instead of lib/libphp.a
+          # plus dependency archives. For consumers whose build systems only
+          # detect a shared libphp (dlopen/-lphp), e.g. PAM.
+          nts_sh_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","x64"]}'
+          nts_sh_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                    lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
             linux-x86_64)           lm="[$musl_x64]"; mac=false; win=false ;;
@@ -151,6 +161,8 @@ jobs:
             linux-aarch64-gnu)      lm="[$gnu_arm]";  mac=false; win=false ;;
             linux-x86_64-gnu-nts)   lm="[$nts_x64]";  mac=false; win=false ;;
             linux-aarch64-gnu-nts)  lm="[$nts_arm]";  mac=false; win=false ;;
+            linux-x86_64-gnu-nts-shared)  lm="[$nts_sh_x64]"; mac=false; win=false ;;
+            linux-aarch64-gnu-nts-shared) lm="[$nts_sh_arm]"; mac=false; win=false ;;
             macos-aarch64)          lm='[]';          mac=true;  win=false ;;
             windows-x86_64)         lm='[]';          mac=false; win=true ;;
             *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
@@ -172,7 +184,8 @@ jobs:
       # Checked out into a subdirectory on purpose: actions/checkout only
       # manages the path it is given, so spc's caches and this job's own
       # output/ and sdk/ directories in the workspace root are untouched.
-      # Only tools/mk-sdk-metadata.sh is used from it, in Package SDK.
+      # Only tools/mk-sdk-metadata.sh and embed/ are used from it, in
+      # Package SDK.
       - name: Checkout build tools
         uses: actions/checkout@v4
         with:
@@ -196,6 +209,7 @@ jobs:
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}${{ matrix.extra }}" \
             -e LIBC="${{ matrix.libc }}" \
             -e ENABLE_ZTS="${{ matrix.zts }}" \
+            -e EMBED_TYPE="${{ matrix.embed }}" \
             -e SPC_OPCACHE_EXTRA_SAPIS="${{ env.SPC_OPCACHE_EXTRA_SAPIS }}" \
             "${{ matrix.image }}" sh -c '
               set -eux
@@ -372,6 +386,11 @@ jobs:
                 ZTS_FLAG="--enable-zts"
               fi
 
+              # static (default) -> lib/libphp.a + dependency archives;
+              # shared -> lib/libphp.so with dependencies linked in
+              # (rc18 src/Package/Target/php/unix.php branches on this).
+              export SPC_CMD_VAR_PHP_EMBED_TYPE="${EMBED_TYPE:-static}"
+
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${PHP_VERSION} \
                 --build-embed \
@@ -386,7 +405,19 @@ jobs:
               # flat layout. cp -L dereferences symlinks
               # (e.g. libcurses.a → libncurses.a).
               mkdir -p /output/lib /output/include
-              find /build/buildroot/lib -name "*.a" -type f -exec cp -Lf {} /output/lib/ \;
+              if [ "$SPC_CMD_VAR_PHP_EMBED_TYPE" = "shared" ]; then
+                # The shared embed installs a versioned libphp-<ver>.so plus
+                # a libphp.so symlink; copy both preserving the link (-P via
+                # cp -a on the find results). Dependency archives stay out --
+                # they are already linked into the .so.
+                find /build/buildroot/lib -name "libphp*.so*" -exec cp -a {} /output/lib/ \;
+                if [ ! -e /output/lib/libphp.so ]; then
+                  echo "ERROR: shared embed build produced no libphp.so under buildroot/lib" >&2
+                  exit 1
+                fi
+              else
+                find /build/buildroot/lib -name "*.a" -type f -exec cp -Lf {} /output/lib/ \;
+              fi
               PHP_INC_DIR=$(find /build/buildroot/include -name php -type d | head -n 1)
               if [ -z "$PHP_INC_DIR" ]; then
                 echo "ERROR: no php header dir found under buildroot/include" >&2
@@ -419,8 +450,15 @@ jobs:
               # equivalent intrinsics.
               if [ "$(uname -m)" = "x86_64" ]; then
                 grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h
-                nm /output/lib/libphp.a | grep -q "SHA256_Transform_shani"
-                echo "==> intrinsics guard passed: SHA-NI transform present in libphp.a"
+                if [ "$SPC_CMD_VAR_PHP_EMBED_TYPE" = "shared" ]; then
+                  # --no-strip keeps the full symtab, so nm sees the
+                  # static-scope transform in the .so as well.
+                  nm /output/lib/libphp.so | grep -q "SHA256_Transform_shani"
+                  echo "==> intrinsics guard passed: SHA-NI transform present in libphp.so"
+                else
+                  nm /output/lib/libphp.a | grep -q "SHA256_Transform_shani"
+                  echo "==> intrinsics guard passed: SHA-NI transform present in libphp.a"
+                fi
               fi
 
               # Bundle the container libstdc++.a (musl-flavored on Alpine,
@@ -476,6 +514,20 @@ jobs:
           # returning, so a broken shim fails the build here rather than in a
           # consumer.
           sh sdk-tools/tools/mk-sdk-metadata.sh sdk linux
+
+          # NTS tarballs ship embed/resolver_shim.c + EMBEDDING.md: libphp.a
+          # is built against glibc 2.28 and references unversioned
+          # __dn_expand/__res_nsearch/__dn_skipname, which glibc >= 2.34
+          # (Ubuntu 22.04+) no longer exports -- embedders must compile the
+          # shim into their build or the link fails. EMBEDDING.md documents
+          # this and the shared-variant usage.
+          case "${{ matrix.suffix }}" in
+            *-nts*)
+              mkdir -p sdk/embed
+              cp sdk-tools/embed/resolver_shim.c sdk/embed/
+              cp sdk-tools/embed/EMBEDDING.md sdk/EMBEDDING.md
+              ;;
+          esac
 
           tar czf php-sdk-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz -C sdk .
 
@@ -1113,12 +1165,14 @@ jobs:
             | `php-sdk-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS Apple Silicon |
             | `php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz` | Windows x86_64 (ZTS) |
 
-            All of the above are thread-safe (ZTS). A non-thread-safe variant
-            (`-gnu-nts`, Linux glibc only, extension set plus `ffi`) is built
-            on demand for consumers that need one; it is not part of every
-            release and is not required for a release to be considered
-            complete. Check the asset list above for whether this release has
-            one.
+            All of the above are thread-safe (ZTS). Non-thread-safe variants
+            (Linux glibc only, extension set plus `ffi`) are built on demand
+            for consumers that need one: `-gnu-nts` ships static `libphp.a`
+            plus `embed/resolver_shim.c` and `EMBEDDING.md`, and
+            `-gnu-nts-shared` ships `libphp.so` with dependencies linked in.
+            They are not part of every release and are not required for a
+            release to be considered complete. Check the asset list above for
+            whether this release has them.
 
             Each tarball contains `lib/`, `include/php/`,
             `THIRD-PARTY-NOTICES.txt`, and — on Linux and macOS — a
