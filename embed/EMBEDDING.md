@@ -33,9 +33,8 @@ group; do not substitute the host's copy across a libc flavor boundary.
 
 ## Shared (`-gnu-nts-shared`): linking or dlopening libphp.so
 
-`lib/libphp.so` is a symlink to the versioned library beside it. It has
-the SDK's dependencies statically linked in and exports the embed API
-(`php_embed_init` / `php_embed_shutdown`).
+`lib/libphp.so` has the SDK's dependencies statically linked in and
+exports the embed API (`php_embed_init` / `php_embed_shutdown`).
 
 ```sh
 cc $(bin/php-config --includes) \
@@ -43,8 +42,14 @@ cc $(bin/php-config --includes) \
 ```
 
 The resolver shim is not needed here: the library's resolver references
-were bound at build time against versioned glibc symbols, which every
-later glibc still provides.
+are versioned (`__dn_expand@GLIBC_2.2.5` etc. — check with
+`readelf --dyn-syms`), which every later glibc still provides.
+
+The library keeps ~15 undefined C++ runtime references (`__cxa_*`,
+`_ZSt*`): the loading process must have `libstdc++.so.6` available at
+runtime. It is present on any system with a C++ toolchain or runtime
+installed; minimal containers may need `libstdc++6` (deb) /
+`libstdc++` (rpm).
 
 Both variants are non-thread-safe (NTS): one PHP engine per process, no
 parallel requests in-process.
