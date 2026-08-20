@@ -41,7 +41,7 @@ on:
         default: ""
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc18"
+  SPC_VERSION: "v3.0.0-pgo-rc19"
   # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
   # rejects SAPI names it doesn't know, so embed-based runtimes get
   # opcache_get_status() === false even with opcache.enable=1. The spc fork
