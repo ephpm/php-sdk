@@ -1263,7 +1263,10 @@ jobs:
           if (-not (Test-Path $clangCl)) {
             $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz"
             Write-Host "Downloading $url ..."
-            Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+            # curl.exe (System32), not Invoke-WebRequest: IWR under PS 5.1 is
+            # slow and times out on this ~1 GB asset (observed on the fleet).
+            & "$env:SystemRoot\System32\curl.exe" -fSL --retry 3 --retry-delay 10 --max-time 1800 -o llvm.tar.xz $url
+            if ($LASTEXITCODE -ne 0) { Write-Error "LLVM download failed (curl exit $LASTEXITCODE)"; exit 1 }
             New-Item -ItemType Directory -Force -Path $llvmDir | Out-Null
             # Full path to Windows' bundled bsdtar: it decompresses .xz
             # natively (liblzma). A bare `tar` can resolve to Git-for-Windows'
