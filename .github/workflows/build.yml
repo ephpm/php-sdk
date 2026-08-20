@@ -1161,7 +1161,7 @@ jobs:
     # communication" with no logs. A healthy run is ~1h40m (installs ~25m +
     # download ~2m + clang build ~60m+); this bound makes an over-long run fail
     # visibly on the GitHub side with logs intact.
-    timeout-minutes: 200
+    timeout-minutes: 119
     # Same extension set as the MSVC lane — the artifact must differ ONLY in
     # the compiler and VM kind.
     env:
