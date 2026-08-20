@@ -1287,7 +1287,10 @@ jobs:
         # a pre-patched php-src via --custom-local (source is used in place,
         # never re-extracted — see spc's ArtifactExtractor). Two patches, both
         # hard-fail if the anchor text has drifted:
-        #   1. win32/build/config.w32: default toolset "vs" -> "clang".
+        #   1. win32/build/config.w32: force PHP_TOOLSET = "clang" right
+        #      before toolset_option_handle(). An ARG_WITH default flip does
+        #      NOT work: spc passes --disable-all, and conf_process_args
+        #      resets every unseen configure arg to "no" (-> "vs").
         #   2. win32/build/config.w32: define HAVE_PRESERVE_NONE inside the
         #      CLANG_TOOLSET block (clang >= 19, x64). zend_portability.h
         #      detects musttail on its own; with both defined,
@@ -1299,12 +1302,16 @@ jobs:
           $cfg = "php-src-clang\win32\build\config.w32"
           $content = Get-Content $cfg -Raw
 
-          $anchor1 = '"is Visual Studio. Use others at your own risk.", "vs");'
+          $anchor1 = 'toolset_option_handle();'
           if (-not $content.Contains($anchor1)) {
-            Write-Error "config.w32 toolset-default anchor not found - php-src build system changed, refusing to build (would silently produce an MSVC/CALL artifact)"
+            Write-Error "config.w32 toolset anchor not found - php-src build system changed, refusing to build (would silently produce an MSVC/CALL artifact)"
             exit 1
           }
-          $content = $content.Replace($anchor1, '"is Visual Studio. Use others at your own risk.", "clang");')
+          # NB: the comment must not contain the literal string ARG_WITH or
+          # ARG_ENABLE — buildconf's preamble extractor greps for those and
+          # would copy the comment line into configure.js as broken JS.
+          $force = "/* Injected by php-sdk's windows-x86_64-clang lane: --disable-all resets`n   every unseen configure arg to `"no`", so a declaration-default can never`n   select the toolset. Force it before the handler runs. */`nPHP_TOOLSET = `"clang`";`ntoolset_option_handle();"
+          $content = $content.Replace($anchor1, $force)
 
           $anchor2 = 'AC_DEFINE("PHP_HAVE_BUILTIN_SMULLL_OVERFLOW", 1, "Define to 1 if the compiler supports ''__builtin_smulll_overflow''.");'
           if (-not $content.Contains($anchor2)) {
@@ -1394,8 +1401,13 @@ jobs:
           if ($spDir -and (Test-Path "$($spDir.FullName)\perl\bin\perl.exe")) {
             $env:PATH = "$($spDir.FullName)\perl\bin;$env:PATH"
           }
+          # --dl-custom-local must be repeated here: the build phase runs its
+          # own downloader pass (--dl-*) and re-resolves php-src without it,
+          # silently replacing the patched tree with the stock tarball.
+          $phpSrc = "$PWD\php-src-clang"
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --dl-with-php=${{ inputs.php_version }} `
+            --dl-custom-local "php-src:$phpSrc" `
             --build-embed `
             --enable-zts `
             --no-strip `
@@ -1412,9 +1424,11 @@ jobs:
           $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" | Select-Object -First 1
           if (-not $lib) { Write-Error "php8embed.lib not found"; exit 1 }
 
+          # zend_vm_kind() lives in zend_execute.obj (Zend/zend_vm_execute.h
+          # is #included by zend_execute.c — there is no zend_vm_execute.obj).
           $vcvars = "C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          $obj = cmd /c "call `"$vcvars`" >nul 2>&1 && lib /nologo /list `"$($lib.FullName)`"" | Select-String "zend_vm_execute.obj" | Select-Object -First 1
-          if (-not $obj) { Write-Error "zend_vm_execute.obj not found in php8embed.lib"; exit 1 }
+          $obj = cmd /c "call `"$vcvars`" >nul 2>&1 && lib /nologo /list `"$($lib.FullName)`"" | Select-String "\\Zend\\zend_execute.obj" | Select-Object -First 1
+          if (-not $obj) { Write-Error "Zend\zend_execute.obj not found in php8embed.lib"; exit 1 }
           $member = $obj.Line.Trim()
           Write-Host "==> Extracting $member"
           cmd /c "call `"$vcvars`" >nul 2>&1 && lib /nologo `"/extract:$member`" /out:zend_vm_execute_probe.obj `"$($lib.FullName)`""
@@ -1498,6 +1512,37 @@ jobs:
             }
           $extHeaderCount = (Get-ChildItem -Path $extDest -Recurse -Filter "*.h").Count
           Write-Host "==> Staged $extHeaderCount ext/*/*.h headers"
+
+          # Strip HAVE_PRESERVE_NONE from the STAGED php_config.h. The built
+          # lib runs the TAILCALL VM internally (the gate above proves it),
+          # but the preserve_none opcode-handler calling convention is not
+          # representable by MSVC consumers (__attribute__ is a no-op path:
+          # they compile the CALL-view types) nor by bindgen (libclang
+          # calling convention 20 panics rust-bindgen 0.72 — found building
+          # ePHPm). The embed API surface does not expose handler pointers,
+          # so the portable CALL-view header is safe for every consumer and
+          # keeps clang- and MSVC-consumer views identical.
+          # Both staged copies: php_config.h AND config.w32.h (Zend's
+          # zend_config.h includes the latter — stripping only one is not
+          # enough; found via a second bindgen panic).
+          foreach ($configHeader in @("sdk/include/php/main/php_config.h", "sdk/include/php/main/config.w32.h")) {
+            $cfgContent = Get-Content $configHeader -Raw
+            if ($cfgContent -notmatch '(?m)^#define HAVE_PRESERVE_NONE 1\r?\n') {
+              Write-Error "HAVE_PRESERVE_NONE not found in $configHeader - did the TAILCALL configure define go missing?"
+              exit 1
+            }
+            $cfgContent = $cfgContent -replace '(?m)^#define HAVE_PRESERVE_NONE 1\r?\n', "/* HAVE_PRESERVE_NONE intentionally removed from the staged SDK header (see the php-sdk windows-x86_64-clang lane). */`n"
+            # Same treatment for the clang-only __builtin_* capability defines
+            # (config.w32's CLANG_TOOLSET block AC_DEFINEs them): Zend headers
+            # gate STATIC INLINE fast paths on these, so an MSVC consumer
+            # compiling the SDK headers emits calls to __builtin_expect /
+            # __builtin_*_overflow it can never link (LNK2001 — found
+            # building ePHPm). MSVC consumers get the same fallback paths the
+            # MSVC-lane headers give them.
+            $cfgContent = $cfgContent -replace '(?m)^#define (PHP_HAVE_BUILTIN_\w+) 1\r?\n', "/* `$1 removed for MSVC consumers (clang-only builtin; see windows-x86_64-clang lane) */`n"
+            Set-Content -Path $configHeader -Value $cfgContent -Encoding ascii -NoNewline
+            Write-Host "==> Stripped clang-only defines from $configHeader"
+          }
 
           # Version guard (see MSVC lane for the incident this prevents).
           $versionHeader = "sdk/include/php/main/php_version.h"
