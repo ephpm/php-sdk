@@ -16,6 +16,7 @@ Built with [static-php-cli](https://github.com/crazywhalecc/static-php-cli) — 
 | Windows x86_64 | `-windows-x86_64` | `lib/php8embed.lib` + dep `.lib`s + headers, ZTS |
 | Linux x86_64 (glibc, **NTS**) | `-linux-x86_64-gnu-nts` | `lib/libphp.a` + headers, non-thread-safe |
 | Linux aarch64 (glibc, **NTS**) | `-linux-aarch64-gnu-nts` | `lib/libphp.a` + headers, non-thread-safe |
+| Windows x86_64 (**experimental**, clang-cl + TAILCALL VM) | `-windows-x86_64-clang` | `lib/php8embed.lib` + dep `.lib`s + headers, ZTS |
 
 The glibc floor is 2.28 (built on AlmaLinux 8 with `gcc-toolset-13`), so a consumer binary linked against these runs on RHEL/Alma 8, Ubuntu 20.04+, Debian 10+, Amazon Linux 2023 and Fedora 40+.
 
@@ -31,6 +32,36 @@ NTS tarballs:
 - are **not** part of a `platform=all` build and do not gate release completeness — a failed NTS build never blocks a release,
 - carry `ffi` in addition to the shared extension set (see below),
 - are kept current only for the minors listed under `minors_nts` in `versions.json`.
+
+### Experimental: Windows clang-cl / TAILCALL VM lane
+
+`-windows-x86_64-clang` is an additive, explicitly-dispatched lane
+(`platform=windows-x86_64-clang`) that builds PHP itself with clang-cl and
+hand-defines `HAVE_PRESERVE_NONE`, so PHP 8.5+ selects the
+`ZEND_VM_KIND_TAILCALL` interpreter instead of the slow `ZEND_VM_KIND_CALL`
+every MSVC build gets. Dependencies stay MSVC-built; clang-cl is
+MSVC-ABI-compatible and the resulting `php8embed.lib` links into MSVC-target
+consumers unchanged. The build hard-fails unless the compiled VM kind is
+verifiably TAILCALL.
+
+**Status: experimental, but a measured performance win with the pinned
+toolchain.** On PHP 8.5.7 CLI (Ryzen 9 5950X, 2026-08, best-of-5 hrtime
+loops), LLVM **22.1.8** clang-cl + TAILCALL runs the dispatch-bound int loop
+**1.7x faster** than the MSVC lane's CALL VM (8.4 ms vs 14.2 ms) and wins on
+string-append and function-call loops too; the mixed reference loop drops
+from 4.4 ms to 2.7 ms — Windows lands within ~12% of the same loop on Linux
+(HYBRID VM). Two sharp edges, which is why this stays experimental:
+
+- **The toolchain must be the pinned LLVM release.** The VS-bundled
+  clang-cl 19.1.5 generates Zend-engine code ~45–90% *slower* than MSVC —
+  enough to swamp the VM-kind win and end up slower than the stock lane.
+  The workflow pins `LLVM_VERSION` and hard-fails on mismatch.
+- **The build hard-fails unless the compiled VM kind is verifiably
+  TAILCALL** (disassembled out of `php8embed.lib`), so it can never silently
+  regress to the CALL VM.
+
+It is never part of `platform=all`, never gates a release, and must not be
+moved into `platforms_required` until it has soaked as an opt-in lane.
 
 ## Tarball layout
 

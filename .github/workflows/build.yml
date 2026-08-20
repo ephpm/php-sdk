@@ -29,6 +29,7 @@ on:
           - linux-aarch64-gnu-nts-shared
           - macos-aarch64
           - windows-x86_64
+          - windows-x86_64-clang
       release_tag_suffix:
         description: "Suffix appended to the release tag (uploads go to
           v<php_version><suffix>). Test/validation branches MUST set a
@@ -99,6 +100,7 @@ jobs:
       linux-matrix: ${{ steps.compute.outputs.linux-matrix }}
       build-macos: ${{ steps.compute.outputs.build-macos }}
       build-windows: ${{ steps.compute.outputs.build-windows }}
+      build-windows-clang: ${{ steps.compute.outputs.build-windows-clang }}
     steps:
       - id: compute
         env:
@@ -165,11 +167,16 @@ jobs:
             linux-aarch64-gnu-nts-shared) lm="[$nts_sh_arm]"; mac=false; win=false ;;
             macos-aarch64)          lm='[]';          mac=true;  win=false ;;
             windows-x86_64)         lm='[]';          mac=false; win=true ;;
+            # Experimental clang-cl/TAILCALL lane. NOT in `all`, on purpose —
+            # same isolation rationale as the -nts entries: it is dispatched
+            # explicitly and can fail without taking a release down.
+            windows-x86_64-clang)   lm='[]';          mac=false; win=false; winclang=true ;;
             *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
           esac
           echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
           echo "build-macos=$mac" >> "$GITHUB_OUTPUT"
           echo "build-windows=$win" >> "$GITHUB_OUTPUT"
+          echo "build-windows-clang=${winclang:-false}" >> "$GITHUB_OUTPUT"
 
   build-linux:
     name: Linux (${{ matrix.arch }}, ${{ matrix.variant }})
@@ -1113,9 +1120,416 @@ jobs:
           name: php-sdk-${{ inputs.php_version }}-windows-x86_64
           path: php-sdk-${{ inputs.php_version }}-windows-x86_64.tar.gz
 
+  # ============================================================================
+  # EXPERIMENTAL: Windows x86_64 built with clang-cl + the TAILCALL VM.
+  #
+  # Motivation: every MSVC-compiled PHP gets the slow ZEND_VM_KIND_CALL
+  # interpreter (Zend/zend_vm_opcodes.h selects HYBRID only under
+  # __GNUC__ && HAVE_GCC_GLOBAL_REGS, never true on win32). PHP 8.5 added a
+  # fifth VM kind, TAILCALL ([[clang::musttail]] + preserve_none), which on
+  # Linux recovers essentially all of HYBRID's win — but it requires clang,
+  # and HAVE_PRESERVE_NONE is only defined by an autoconf run-test that never
+  # runs on Windows. This lane hand-defines it and builds PHP itself with
+  # clang-cl (deps stay MSVC-built; clang-cl is MSVC-ABI-compatible, so the
+  # resulting php8embed.lib links into the existing MSVC-target consumers
+  # unchanged).
+  #
+  # MEASURED (2026-08-19, Ryzen 9 5950X, PHP 8.5.7 CLI, plain --disable-all
+  # ZTS builds, best-of-5 hrtime CPU loops):
+  #   - LLVM 22.1.8 clang-cl + TAILCALL: int-loop 8.4ms — 1.7x FASTER than
+  #     MSVC 19.44's CALL VM (14.2ms); faster on string-append and
+  #     function-call loops too. Reference mixed loop: 2.72ms vs 4.42ms.
+  #   - The VS-BUNDLED clang-cl 19.1.5 is a trap: its Zend codegen is
+  #     ~45-90% SLOWER than MSVC (int-loop 22.6ms ZTS / 20.3ms NTS), enough
+  #     to swamp the VM-kind win entirely. That is why this job downloads a
+  #     pinned LLVM release instead of installing the VS Clang component.
+  # LLVM_VERSION below is pinned to the exact measured-good toolchain; bump
+  # it only with fresh benchmark evidence.
+  #
+  # This job is additive-only: dispatched via platform=windows-x86_64-clang,
+  # never part of `all`, never in versions.json platforms_required, and its
+  # artifact name (php-sdk-<ver>-windows-x86_64-clang.tar.gz) can never
+  # collide with the MSVC lane's.
+  # ============================================================================
+  build-windows-clang:
+    name: Windows (x86_64, clang-cl TAILCALL, experimental)
+    needs: setup
+    if: needs.setup.outputs.build-windows-clang == 'true'
+    runs-on: [self-hosted, windows, x64]
+    # Same extension set as the MSVC lane — the artifact must differ ONLY in
+    # the compiler and VM kind.
+    env:
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      # Pinned LLVM toolchain (see job comment: VS-bundled clang 19 is slower
+      # than MSVC; 22.1.8 is the measured-good floor).
+      LLVM_VERSION: "22.1.8"
+    steps:
+      - name: Clean up previous builds
+        shell: powershell
+        run: |
+          foreach ($dir in @('buildroot', 'source', 'downloads', 'sdk', 'php-sdk-binary-tools', 'php-src-clang')) {
+            if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          }
+          Remove-Item -Force *.tar.gz -ErrorAction SilentlyContinue
+
+      - name: Install Git for Windows
+        shell: powershell
+        run: |
+          $gitRoot = "C:\Program Files\Git"
+          if (-not (Test-Path "$gitRoot\cmd\git.exe")) {
+            $ver = "2.49.0"
+            $url = "https://github.com/git-for-windows/git/releases/download/v${ver}.windows.1/PortableGit-${ver}-64-bit.7z.exe"
+            Write-Host "Downloading PortableGit $ver..."
+            Invoke-WebRequest -Uri $url -OutFile portable-git.7z.exe
+            Write-Host "Extracting to $gitRoot..."
+            Start-Process -FilePath .\portable-git.7z.exe `
+              -ArgumentList @("-o`"$gitRoot`"", '-y') -Wait -NoNewWindow
+            Remove-Item portable-git.7z.exe
+            if (-not (Test-Path "$gitRoot\cmd\git.exe")) {
+              Write-Error "PortableGit extraction failed: $gitRoot\cmd\git.exe not found"
+              exit 1
+            }
+          }
+          "$gitRoot\cmd" | Out-File -Append -FilePath $env:GITHUB_PATH
+          "$gitRoot\usr\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Checkout build tools
+        uses: actions/checkout@v4
+        with:
+          path: sdk-tools
+
+      - name: Install Visual Studio Build Tools
+        shell: powershell
+        # Identical to the MSVC lane: MSVC provides the linker, libs, headers
+        # and builds every dependency. Only PHP itself compiles with clang-cl,
+        # which comes from the pinned LLVM release in the next step — NOT from
+        # VS's Clang component (VS bundles LLVM 19, whose Zend codegen is
+        # slower than MSVC; see the job comment).
+        run: |
+          $installPath = "C:\BuildTools"
+          $msbuild = "$installPath\MSBuild\Current\Bin\MSBuild.exe"
+          $communityPath = "C:\Program Files\Microsoft Visual Studio\2022\Community"
+
+          if (-not (Test-Path $msbuild)) {
+            Write-Host "Downloading VS Build Tools bootstrapper..."
+            Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile vs_buildtools.exe
+
+            Write-Host "Launching install (bootstrapper may exit before install completes)..."
+            $proc = Start-Process -FilePath .\vs_buildtools.exe `
+              -ArgumentList @(
+                '--quiet', '--wait', '--norestart', '--nocache',
+                '--installPath', $installPath,
+                '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+                '--includeRecommended'
+              ) -Wait -PassThru -NoNewWindow
+            Write-Host "Bootstrapper exit code: $($proc.ExitCode)"
+            Remove-Item vs_buildtools.exe
+
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $timeoutMin = 20
+            while (-not (Test-Path $msbuild) -and $sw.Elapsed.TotalMinutes -lt $timeoutMin) {
+              Start-Sleep -Seconds 30
+              Write-Host ("  ...waiting for VS install ({0:F0}s)" -f $sw.Elapsed.TotalSeconds)
+            }
+
+            if (-not (Test-Path $msbuild)) {
+              Write-Host "::error::VS install timed out after $timeoutMin min - $msbuild never appeared"
+              exit 1
+            }
+            Write-Host ("MSBuild.exe found after {0:F0}s" -f $sw.Elapsed.TotalSeconds)
+          } else {
+            Write-Host "VS Build Tools already present at $installPath"
+          }
+
+          # Junction the path spc's hardcoded check expects -> our install path
+          if (-not (Test-Path $communityPath)) {
+            $parent = Split-Path $communityPath -Parent
+            if (-not (Test-Path $parent)) {
+              New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            New-Item -ItemType Junction -Path $communityPath -Target $installPath | Out-Null
+            Write-Host "Junction $communityPath -> $installPath"
+          }
+
+      - name: Install pinned LLVM (clang-cl)
+        shell: powershell
+        # php-src's configure.js clang toolset resolves the compiler with
+        # PATH_PROG('clang-cl'), so the pinned LLVM bin dir must be FIRST on
+        # PATH (ahead of any VS-bundled clang). The version gate hard-fails
+        # on mismatch rather than silently building with a slower compiler.
+        run: |
+          $llvmDir = "C:\llvm-${{ env.LLVM_VERSION }}"
+          $clangCl = "$llvmDir\bin\clang-cl.exe"
+          if (-not (Test-Path $clangCl)) {
+            $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ env.LLVM_VERSION }}/clang+llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc.tar.xz"
+            Write-Host "Downloading $url ..."
+            Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
+            New-Item -ItemType Directory -Force -Path $llvmDir | Out-Null
+            tar -xf llvm.tar.xz -C $llvmDir --strip-components=1
+            Remove-Item llvm.tar.xz
+            if (-not (Test-Path $clangCl)) {
+              Write-Error "LLVM extraction failed: $clangCl not found"
+              exit 1
+            }
+          }
+          $v = (& $clangCl --version | Select-String 'clang version ([\d\.]+)').Matches[0].Groups[1].Value
+          Write-Host "clang-cl version: $v"
+          if ($v -ne "${{ env.LLVM_VERSION }}") {
+            Write-Error "clang-cl is $v, expected pinned ${{ env.LLVM_VERSION }}"
+            exit 1
+          }
+          "$llvmDir\bin" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Clone and patch php-src (clang toolset default + HAVE_PRESERVE_NONE)
+        shell: powershell
+        # Stock spc's Windows target hardcodes its configure.bat argument list
+        # (no --with-toolset passthrough), so instead of forking spc we feed it
+        # a pre-patched php-src via --custom-local (source is used in place,
+        # never re-extracted — see spc's ArtifactExtractor). Two patches, both
+        # hard-fail if the anchor text has drifted:
+        #   1. win32/build/config.w32: default toolset "vs" -> "clang".
+        #   2. win32/build/config.w32: define HAVE_PRESERVE_NONE inside the
+        #      CLANG_TOOLSET block (clang >= 19, x64). zend_portability.h
+        #      detects musttail on its own; with both defined,
+        #      Zend/zend_vm_opcodes.h selects ZEND_VM_KIND_TAILCALL.
+        run: |
+          git clone --depth 1 -c core.longpaths=true --branch php-${{ inputs.php_version }} https://github.com/php/php-src.git php-src-clang
+          if ($LASTEXITCODE -ne 0) { Write-Error "php-src clone failed"; exit 1 }
+
+          $cfg = "php-src-clang\win32\build\config.w32"
+          $content = Get-Content $cfg -Raw
+
+          $anchor1 = '"is Visual Studio. Use others at your own risk.", "vs");'
+          if (-not $content.Contains($anchor1)) {
+            Write-Error "config.w32 toolset-default anchor not found - php-src build system changed, refusing to build (would silently produce an MSVC/CALL artifact)"
+            exit 1
+          }
+          $content = $content.Replace($anchor1, '"is Visual Studio. Use others at your own risk.", "clang");')
+
+          $anchor2 = 'AC_DEFINE("PHP_HAVE_BUILTIN_SMULLL_OVERFLOW", 1, "Define to 1 if the compiler supports ''__builtin_smulll_overflow''.");'
+          if (-not $content.Contains($anchor2)) {
+            Write-Error "config.w32 CLANG_TOOLSET anchor not found - cannot inject HAVE_PRESERVE_NONE, refusing to build"
+            exit 1
+          }
+          # Built line-by-line (no here-string: its closing "@ must sit at
+          # column 0, which would terminate this YAML block scalar).
+          $injectLines = @(
+            $anchor2,
+            '',
+            "`tif (COMPILER_NUMERIC_VERSION >= 1900 && X64) {",
+            "`t`t/* clang >= 19 supports __attribute__((preserve_none)) on x86-64.",
+            "`t`t   Together with musttail (header-detected in zend_portability.h)",
+            "`t`t   this selects the TAILCALL VM instead of the slow CALL VM.",
+            "`t`t   Injected by php-sdk's windows-x86_64-clang lane. */",
+            "`t`tAC_DEFINE(`"HAVE_PRESERVE_NONE`", 1, `"Define to 1 if the compiler supports '__attribute__((preserve_none))'.`");",
+            "`t}"
+          )
+          $content = $content.Replace($anchor2, ($injectLines -join "`n"))
+          Set-Content -Path $cfg -Value $content -Encoding ascii
+          Write-Host "==> php-src patched for clang toolset + TAILCALL"
+
+      - name: Download spc
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/luthermonson/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
+          "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
+
+      - name: Download PHP sources
+        shell: powershell
+        # Same retry loop as the MSVC lane (see its comments), plus
+        # --custom-local pointing php-src at the patched clone. Everything
+        # else (dep libraries) downloads and builds exactly as in the MSVC
+        # lane — deps stay MSVC-built; only PHP itself compiles with clang-cl.
+        run: |
+          $phpSrc = "$PWD\php-src-clang"
+          $max = 50
+          for ($i = 1; $i -le $max; $i++) {
+            $spcArgs = @(
+              'download',
+              '--with-php=${{ inputs.php_version }}',
+              '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
+              '--retry=3',
+              '--prefer-pre-built',
+              '--custom-local', "php-src:$phpSrc"
+            )
+            if ($i -eq $max) { $spcArgs += '-vv' }
+            spc @spcArgs
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq $max) {
+              Write-Error "spc download failed after $max attempts"
+              exit 1
+            }
+            $s = Get-Random -Minimum 3 -Maximum 7
+            Write-Host "spc download flaked (attempt $i), retrying in ${s}s..."
+            Start-Sleep -Seconds $s
+          }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run spc doctor
+        shell: powershell
+        run: |
+          spc doctor --auto-fix
+          exit 0
+
+      - name: Add Strawberry Perl to PATH
+        shell: powershell
+        run: |
+          $perlExe = Get-ChildItem -Recurse -Filter "perl.exe" -Path pkgroot -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "strawberry" } |
+            Select-Object -First 1
+          if ($perlExe) {
+            $perlBin = $perlExe.DirectoryName
+            Write-Host "Adding Strawberry Perl to PATH: $perlBin"
+            $perlBin | Out-File -Append -FilePath $env:GITHUB_PATH
+          } else {
+            Write-Host "::warning::Strawberry Perl not found in pkgroot - falling back to system perl"
+          }
+
+      - name: Build php8embed (clang-cl toolset)
+        shell: powershell
+        run: |
+          $spDir = Get-ChildItem -Directory pkgroot -Recurse -Filter "strawberry-perl*" -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if ($spDir -and (Test-Path "$($spDir.FullName)\perl\bin\perl.exe")) {
+            $env:PATH = "$($spDir.FullName)\perl\bin;$env:PATH"
+          }
+          spc build ${{ env.WIN_PHP_EXTENSIONS }} `
+            --dl-with-php=${{ inputs.php_version }} `
+            --build-embed `
+            --enable-zts `
+            --no-strip `
+            --debug
+
+      - name: Verify VM kind is TAILCALL
+        shell: powershell
+        # Hard gate: the whole point of this lane. zend_vm_kind() is a
+        # compile-time-constant return; disassemble it out of the built lib
+        # and require `mov eax,5` (ZEND_VM_KIND_TAILCALL). Without this the
+        # lane could silently regress to the CALL VM (kind 1) and nobody
+        # would notice until a benchmark.
+        run: |
+          $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" | Select-Object -First 1
+          if (-not $lib) { Write-Error "php8embed.lib not found"; exit 1 }
+
+          $vcvars = "C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          $obj = cmd /c "call `"$vcvars`" >nul 2>&1 && lib /nologo /list `"$($lib.FullName)`"" | Select-String "zend_vm_execute.obj" | Select-Object -First 1
+          if (-not $obj) { Write-Error "zend_vm_execute.obj not found in php8embed.lib"; exit 1 }
+          $member = $obj.Line.Trim()
+          Write-Host "==> Extracting $member"
+          cmd /c "call `"$vcvars`" >nul 2>&1 && lib /nologo `"/extract:$member`" /out:zend_vm_execute_probe.obj `"$($lib.FullName)`""
+          if (-not (Test-Path zend_vm_execute_probe.obj)) { Write-Error "lib /extract failed"; exit 1 }
+
+          $disasm = cmd /c "call `"$vcvars`" >nul 2>&1 && dumpbin /disasm zend_vm_execute_probe.obj"
+          $idx = ($disasm | Select-String -Pattern '^zend_vm_kind:$' | Select-Object -First 1).LineNumber
+          if (-not $idx) { Write-Error "zend_vm_kind not found in disassembly"; exit 1 }
+          $body = $disasm[($idx)..($idx + 3)] -join "`n"
+          Write-Host "zend_vm_kind:`n$body"
+          if ($body -match 'mov\s+eax,5') {
+            Write-Host "==> VM kind VERIFIED: ZEND_VM_KIND_TAILCALL (5)"
+          } else {
+            Write-Error "VM kind is NOT TAILCALL - the artifact compiled the wrong interpreter. Refusing to publish."
+            exit 1
+          }
+          Remove-Item zend_vm_execute_probe.obj -ErrorAction SilentlyContinue
+
+      - name: Package SDK
+        shell: powershell
+        # Identical packaging to the MSVC lane, with the -clang artifact name.
+        run: |
+          New-Item -ItemType Directory -Force -Path sdk/lib, sdk/include
+
+          $lib = Get-ChildItem -Recurse -Filter "php8embed.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lib) {
+            Copy-Item $lib.FullName sdk/lib/
+            Write-Host "==> Found php8embed.lib at $($lib.FullName)"
+          } else {
+            Write-Error "php8embed.lib not found anywhere in build tree"
+            exit 1
+          }
+
+          $depDirs = @()
+          Get-ChildItem -Recurse -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "lib" -and $_.Parent.Name -like "buildroot*" } |
+            ForEach-Object { $depDirs += $_.FullName }
+          $depDirs += (Split-Path $lib.FullName -Parent)
+          $depDirs = $depDirs | Select-Object -Unique
+          $copied = 0
+          foreach ($dir in $depDirs) {
+            Get-ChildItem -Path $dir -Filter "*.lib" -File -ErrorAction SilentlyContinue |
+              ForEach-Object {
+                Copy-Item $_.FullName sdk/lib/ -Force
+                $copied++
+              }
+          }
+          Write-Host "==> Staged $copied .lib file(s) from spc buildroot dirs: $($depDirs -join ', ')"
+
+          Copy-Item -Recurse buildroot/include/php sdk/include/php
+
+          # win32 headers (see MSVC lane comments). The php-src tree is the
+          # --custom-local clone in the workspace root, not under source/.
+          $win32SrcDir = Get-Item "php-src-clang"
+          if (-not (Test-Path "$($win32SrcDir.FullName)/win32/ioutil.h")) {
+            Write-Error "php-src-clang/win32/ioutil.h missing - custom-local source tree incomplete"
+            exit 1
+          }
+          $win32Dest = "sdk/include/php/main/win32"
+          New-Item -ItemType Directory -Force -Path $win32Dest | Out-Null
+          Copy-Item "$($win32SrcDir.FullName)/win32/*.h" $win32Dest
+          Write-Host "==> Staged win32 headers"
+
+          $streamsDest = "sdk/include/php/main/streams"
+          New-Item -ItemType Directory -Force -Path $streamsDest | Out-Null
+          Copy-Item "$($win32SrcDir.FullName)/main/streams/*.h" $streamsDest
+          Write-Host "==> Staged streams headers"
+
+          $extSrcRoot = "$($win32SrcDir.FullName)/ext"
+          if (-not (Test-Path "$extSrcRoot/standard/php_var.h")) {
+            Write-Error "Could not find php-src/ext/standard/php_var.h under $extSrcRoot"
+            exit 1
+          }
+          $extDest = "sdk/include/php/ext"
+          Get-ChildItem -Path $extSrcRoot -Recurse -Filter "*.h" |
+            ForEach-Object {
+              $rel = $_.FullName.Substring($extSrcRoot.Length).TrimStart('\','/')
+              $dest = Join-Path $extDest $rel
+              New-Item -ItemType Directory -Force -Path (Split-Path $dest -Parent) | Out-Null
+              Copy-Item $_.FullName $dest
+            }
+          $extHeaderCount = (Get-ChildItem -Path $extDest -Recurse -Filter "*.h").Count
+          Write-Host "==> Staged $extHeaderCount ext/*/*.h headers"
+
+          # Version guard (see MSVC lane for the incident this prevents).
+          $versionHeader = "sdk/include/php/main/php_version.h"
+          $match = Select-String -Path $versionHeader -Pattern '#define PHP_VERSION "([^"]+)"'
+          if (-not $match) {
+            Write-Error "Could not read PHP_VERSION from $versionHeader"
+            exit 1
+          }
+          $staged = $match.Matches[0].Groups[1].Value
+          if ($staged -ne "${{ inputs.php_version }}") {
+            Write-Error "staged PHP is '$staged' but this build was asked for '${{ inputs.php_version }}'"
+            exit 1
+          }
+          Write-Host "==> Version guard OK: staged PHP $staged"
+
+          bash sdk-tools/tools/mk-sdk-metadata.sh sdk windows
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "mk-sdk-metadata.sh failed with exit code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+
+          tar czf php-sdk-${{ inputs.php_version }}-windows-x86_64-clang.tar.gz -C sdk .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-sdk-${{ inputs.php_version }}-windows-x86_64-clang
+          path: php-sdk-${{ inputs.php_version }}-windows-x86_64-clang.tar.gz
+
   release:
     name: Create Release
-    needs: [build-linux, build-macos, build-windows]
+    needs: [build-linux, build-macos, build-windows, build-windows-clang]
     # Partial rebuilds skip the un-targeted build jobs (skipped != failure),
     # but a real failure should still abort the release.
     if: |
@@ -1123,6 +1537,7 @@ jobs:
       && needs.build-linux.result   != 'failure'
       && needs.build-macos.result   != 'failure'
       && needs.build-windows.result != 'failure'
+      && needs.build-windows-clang.result != 'failure'
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
@@ -1173,6 +1588,12 @@ jobs:
             They are not part of every release and are not required for a
             release to be considered complete. Check the asset list above for
             whether this release has them.
+
+            `php-sdk-<ver>-windows-x86_64-clang.tar.gz`, when present, is the
+            EXPERIMENTAL clang-cl/TAILCALL-VM Windows build — ~1.7x faster VM
+            dispatch than the MSVC lane, built with a pinned LLVM release
+            (dispatched explicitly, never required; see the
+            build-windows-clang job comments and the README before adopting).
 
             Each tarball contains `lib/`, `include/php/`,
             `THIRD-PARTY-NOTICES.txt`, and — on Linux and macOS — a
