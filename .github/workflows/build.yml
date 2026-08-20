@@ -1156,6 +1156,12 @@ jobs:
     needs: setup
     if: needs.setup.outputs.build-windows-clang == 'true'
     runs-on: [self-hosted, windows, x64]
+    # Keep under ephemerd's job_timeout (2h at the time of writing): when THAT
+    # fires first, the VM is destroyed mid-step and the job shows "runner lost
+    # communication" with no logs. A healthy run is ~1h40m (installs ~25m +
+    # download ~2m + clang build ~60m+); this bound makes an over-long run fail
+    # visibly on the GitHub side with logs intact.
+    timeout-minutes: 115
     # Same extension set as the MSVC lane — the artifact must differ ONLY in
     # the compiler and VM kind.
     env:
@@ -1257,6 +1263,9 @@ jobs:
         # PATH_PROG('clang-cl'), so the pinned LLVM bin dir must be FIRST on
         # PATH (ahead of any VS-bundled clang). The version gate hard-fails
         # on mismatch rather than silently building with a slower compiler.
+        # 10-minute cap: the ~1 GB download takes ~2 min healthy; a stalled
+        # transfer must fail with logs, not eat the job's ephemerd budget.
+        timeout-minutes: 10
         run: |
           $llvmDir = "C:\llvm-${{ env.LLVM_VERSION }}"
           $clangCl = "$llvmDir\bin\clang-cl.exe"
@@ -1350,13 +1359,19 @@ jobs:
 
       - name: Download PHP sources
         shell: powershell
-        # Same retry loop as the MSVC lane (see its comments), plus
-        # --custom-local pointing php-src at the patched clone. Everything
-        # else (dep libraries) downloads and builds exactly as in the MSVC
-        # lane — deps stay MSVC-built; only PHP itself compiles with clang-cl.
+        # Same shape as the MSVC lane, plus --custom-local pointing php-src at
+        # the patched clone. Deps stay MSVC-built; only PHP compiles clang-cl.
+        #
+        # timeout-minutes + max=3: a healthy download is ~80 s cold / 2 s warm
+        # (rc19 validated locally). The old 50-attempt loop with curl's 1-hour
+        # stall tolerance could legally run >1.5 h on a flaky-egress VM, which
+        # pushed the JOB past ephemerd's 2 h job_timeout — the runner is then
+        # destroyed mid-step with no logs ("lost communication"). Fail fast and
+        # loudly instead; the fleet-side ask is a larger job_timeout.
+        timeout-minutes: 15
         run: |
           $phpSrc = "$PWD\php-src-clang"
-          $max = 50
+          $max = 3
           for ($i = 1; $i -le $max; $i++) {
             $spcArgs = @(
               'download',
