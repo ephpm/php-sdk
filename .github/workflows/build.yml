@@ -1357,10 +1357,37 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/luthermonson/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
           "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
 
+      - name: Pre-fetch git-sourced libraries (shallow)
+        shell: powershell
+        # gettext-win and libiconv-win are spc's only git-type sources in this
+        # extension set; every other artifact is a fast GitHub tarball. spc's
+        # FULL clone of winlibs/gettext hung until step timeout on the fleet
+        # VM's flaky egress in three consecutive dispatches (attempts 3-5) —
+        # shallow single-branch clones cut the transfer by orders of magnitude
+        # and the runner's own git has succeeded on this VM every attempt.
+        timeout-minutes: 10
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($lib in @(
+            @{ dir = "$PWD\gettext-win-src";  url = 'https://github.com/winlibs/gettext.git';           branch = '0.18' },
+            @{ dir = "$PWD\libiconv-win-src"; url = 'https://github.com/static-php/libiconv-win.git';   branch = 'master' }
+          )) {
+            $ok = $false
+            for ($i = 1; $i -le 3; $i++) {
+              if (Test-Path $lib.dir) { Remove-Item -Recurse -Force $lib.dir }
+              git clone --depth 1 --branch $lib.branch $lib.url $lib.dir
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Write-Host "shallow clone of $($lib.url) flaked (attempt $i), retrying..."
+              Start-Sleep -Seconds 5
+            }
+            if (-not $ok) { Write-Error "could not clone $($lib.url) after 3 attempts"; exit 1 }
+          }
+
       - name: Download PHP sources
         shell: powershell
         # Same shape as the MSVC lane, plus --custom-local pointing php-src at
-        # the patched clone. Deps stay MSVC-built; only PHP compiles clang-cl.
+        # the patched clone and the two pre-fetched git-sourced libs (see the
+        # step above). Deps stay MSVC-built; only PHP compiles clang-cl.
         #
         # timeout-minutes + max=3: a healthy download is ~80 s cold / 2 s warm
         # (rc19 validated locally). The old 50-attempt loop with curl's 1-hour
@@ -1379,7 +1406,9 @@ jobs:
               '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
               '--retry=3',
               '--prefer-pre-built',
-              '--custom-local', "php-src:$phpSrc"
+              '--custom-local', "php-src:$phpSrc",
+              '--custom-local', "gettext-win:$PWD\gettext-win-src",
+              '--custom-local', "libiconv-win:$PWD\libiconv-win-src"
             )
             if ($i -eq $max) { $spcArgs += '-vv' }
             spc @spcArgs
@@ -1430,6 +1459,8 @@ jobs:
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
             --dl-with-php=${{ inputs.php_version }} `
             --dl-custom-local "php-src:$phpSrc" `
+            --dl-custom-local "gettext-win:$PWD\gettext-win-src" `
+            --dl-custom-local "libiconv-win:$PWD\libiconv-win-src" `
             --build-embed `
             --enable-zts `
             --no-strip `
