@@ -1265,7 +1265,11 @@ jobs:
             Write-Host "Downloading $url ..."
             Invoke-WebRequest -Uri $url -OutFile llvm.tar.xz
             New-Item -ItemType Directory -Force -Path $llvmDir | Out-Null
-            tar -xf llvm.tar.xz -C $llvmDir --strip-components=1
+            # Full path to Windows' bundled bsdtar: it decompresses .xz
+            # natively (liblzma). A bare `tar` can resolve to Git-for-Windows'
+            # GNU tar on the runner PATH, which shells out to an `xz` binary
+            # Git's environment does not ship — "xz: Cannot exec".
+            & "$env:SystemRoot\System32\tar.exe" -xf llvm.tar.xz -C $llvmDir --strip-components=1
             Remove-Item llvm.tar.xz
             if (-not (Test-Path $clangCl)) {
               Write-Error "LLVM extraction failed: $clangCl not found"
