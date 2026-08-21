@@ -701,7 +701,13 @@ jobs:
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
       - name: Record Zend VM kind
-        # Informational only (never fails the build): record which Zend VM the
+        # continue-on-error guarantees this informational probe can never fail
+        # the release leg. The script runs under the Actions default shell
+        # (bash -eo pipefail), where a degraded probe (missing/renamed symbol,
+        # objdump absent, unmatched immediate) trips set -e inside a command
+        # substitution before its own guard clause can warn-and-exit-0.
+        continue-on-error: true
+        # Record which Zend VM the
         # shipped libphp.a actually compiled. macOS builds with clang, which
         # defines __GNUC__ but FAILS PHP's HAVE_GCC_GLOBAL_REGS configure check,
         # so the fast HYBRID VM is skipped. PHP 8.5 recovers speed via the
