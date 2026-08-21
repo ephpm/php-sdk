@@ -700,6 +700,48 @@ jobs:
 
           tar czf php-sdk-${{ inputs.php_version }}-macos-${{ matrix.arch }}.tar.gz -C sdk .
 
+      - name: Record Zend VM kind
+        # Informational only (never fails the build): record which Zend VM the
+        # shipped libphp.a actually compiled. macOS builds with clang, which
+        # defines __GNUC__ but FAILS PHP's HAVE_GCC_GLOBAL_REGS configure check,
+        # so the fast HYBRID VM is skipped. PHP 8.5 recovers speed via the
+        # TAILCALL VM (clang musttail + preserve_none); 8.3/8.4 have no TAILCALL
+        # path and fall all the way to the slowest CALL VM. There is no honest
+        # clang route to beat CALL before 8.5, and GCC-on-macOS is not a
+        # supported spc configuration (config/env.ini [macos] hardcodes
+        # CC=clang; the toolchain classes only set the SPC_LINUX_DEFAULT_* vars
+        # the macOS section never reads). So this step surfaces the situation in
+        # the build log instead of pretending macOS ships HYBRID.
+        #
+        # zend_vm_kind() is ZEND_API and returns the compile-time ZEND_VM_KIND
+        # constant (1=CALL 2=SWITCH 3=GOTO 4=HYBRID 5=TAILCALL) as a single
+        # `mov w0, #<n>; ret`. Disassemble that one symbol out of the archive.
+        run: |
+          LIB="sdk/lib/libphp.a"
+          OBJDUMP="$(brew --prefix llvm)/bin/llvm-objdump"
+          [ -x "$OBJDUMP" ] || OBJDUMP="$(command -v llvm-objdump || command -v objdump)"
+          dis="$("$OBJDUMP" -d --disassemble-symbols=_zend_vm_kind "$LIB" 2>/dev/null)"
+          [ -n "$dis" ] || dis="$("$OBJDUMP" -d --disassemble-symbols=zend_vm_kind "$LIB" 2>/dev/null)"
+          imm="$(printf '%s\n' "$dis" | grep -oE 'w0, #(0x)?[0-9a-fA-F]+' | head -1 | sed 's/.*#//')"
+          kind=""
+          [ -n "$imm" ] && kind=$((imm))
+          case "$kind" in
+            1) name="CALL" ;; 2) name="SWITCH" ;; 3) name="GOTO" ;;
+            4) name="HYBRID" ;; 5) name="TAILCALL" ;; *) name="unknown" ;;
+          esac
+          echo "==> macOS ${{ inputs.php_version }} libphp.a Zend VM kind: ${name} (${kind:-?})"
+          if [ -z "$kind" ]; then
+            echo "::warning::could not read Zend VM kind from $LIB (objdump=$OBJDUMP)"
+            exit 0
+          fi
+          php_minor=$(echo "${{ inputs.php_version }}" | cut -d. -f2)
+          if [ "$name" = "CALL" ]; then
+            echo "::warning::macOS PHP ${{ inputs.php_version }} ships the slowest CALL VM. clang fails HAVE_GCC_GLOBAL_REGS (no HYBRID) and TAILCALL does not exist before 8.5. Expected for 8.3/8.4; recommend macOS PHP 8.5 (TAILCALL) for CPU-bound work."
+          fi
+          if [ "$php_minor" -ge 5 ] && [ "$name" != "TAILCALL" ]; then
+            echo "::warning::macOS PHP ${{ inputs.php_version }} is 8.5+ but the VM kind is ${name}, expected TAILCALL - the clang toolchain may have regressed."
+          fi
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

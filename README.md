@@ -63,6 +63,31 @@ from 4.4 ms to 2.7 ms — Windows lands within ~12% of the same loop on Linux
 It is never part of `platform=all`, never gates a release, and must not be
 moved into `platforms_required` until it has soaked as an opt-in lane.
 
+### macOS Zend VM kind
+
+macOS SDKs do **not** ship the HYBRID VM. The macOS build uses clang (Homebrew
+LLVM), and clang defines `__GNUC__` but fails PHP's `HAVE_GCC_GLOBAL_REGS`
+configure check, so the fast `ZEND_VM_KIND_HYBRID` interpreter is never
+selected. The result depends on the PHP minor:
+
+| macOS PHP | Zend VM kind | Notes |
+|-----------|--------------|-------|
+| 8.5+ | `TAILCALL` (5) | clang ≥ 19 `musttail` + `preserve_none`; ~HYBRID speed |
+| 8.4 | `CALL` (1) | slowest VM — no TAILCALL path before 8.5 |
+| 8.3 | `CALL` (1) | slowest VM — no TAILCALL path before 8.5 |
+
+HYBRID would require building PHP **and** its ~20 dependency libraries with real
+GCC on `aarch64-apple-darwin`. That is not a supported static-php-cli
+configuration: `config/env.ini`'s `[macos]` section hardcodes `CC=clang`, and
+the toolchain classes only set the `SPC_LINUX_DEFAULT_*` vars the macOS section
+never reads — so `SPC_TOOLCHAIN=GccNativeToolchain` does not switch the macOS
+compiler. Wiring that up (plus getting Homebrew GCC to pass
+`HAVE_GCC_GLOBAL_REGS` for the aarch64 global registers and produce a working
+JIT, which the build already had to abandon *Apple* clang for) is a large spc
+change PHP upstream does not test on macOS. Until then: **use macOS PHP 8.5 for
+CPU-bound workloads.** The build logs the selected VM kind (macOS "Record Zend
+VM kind" step) and warns when a pre-8.5 macOS SDK lands on CALL.
+
 ## Tarball layout
 
 ```
