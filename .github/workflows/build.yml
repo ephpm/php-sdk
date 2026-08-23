@@ -317,6 +317,44 @@ jobs:
                 sleep 3
               done
 
+              # php-src, not our CFLAGS, is why every musl x86_64 SDK has
+              # shipped without SHA-NI/PCLMUL/AVX2 (issue #51). configure.ac
+              # wraps BOTH attribute probes in
+              #   AS_CASE([$host_alias], [..|*-*-*musl*|..], [true], [
+              #     AX_GCC_FUNC_ATTRIBUTE([ifunc])
+              #     AX_GCC_FUNC_ATTRIBUTE([target])])
+              # and $host_alias holds the canonical triple
+              # (x86_64-pc-linux-musl) even though nothing passes --host, so
+              # on Alpine neither probe ever runs: config.log has no
+              # ax_cv_have_func_attribute_target line at all and php_config.h
+              # keeps the #undef. The exclusion is there for ifunc, which musl
+              # genuinely does not support. The target attribute itself works
+              # on Alpine gcc (the probe links with zero stderr), and alone it
+              # is what selects the non-ifunc, MINIT-resolved SIMD paths:
+              # ZEND_INTRIN_*_FUNC_PTR in Zend/zend_portability.h and
+              # PHP_HASH_INTRIN_SHA_RESOLVER in ext/hash/php_hash_sha.h. So
+              # run the target probe unconditionally and leave ifunc gated as
+              # php-src intends. On glibc the later call hits the autoconf
+              # cache and nothing changes; on non-x86 the probe answers no on
+              # its own. spc runs buildconf --force, so the regenerated
+              # configure picks this up.
+              #
+              # It has to happen in the tarball, not in the extracted tree:
+              # spc download only downloads, spc build is what extracts (and
+              # re-extracts with force), so there is no point between the two
+              # commands where /build/source/php-src exists to patch. The
+              # greps are the guard -- if php-src moves this block the build
+              # fails here instead of silently shipping soft SIMD again.
+              mkdir -p /tmp/php-src-patch
+              tar xzf /tmp/php-src-mirror.tar.gz -C /tmp/php-src-patch
+              php_src_top=$(ls -1 /tmp/php-src-patch | head -n 1)
+              php_src_ac="/tmp/php-src-patch/${php_src_top}/configure.ac"
+              grep -q "^dnl Checks for GCC function attributes" "$php_src_ac"
+              sed -i "/^dnl Checks for GCC function attributes/i AX_GCC_FUNC_ATTRIBUTE([target])" "$php_src_ac"
+              grep -q "^AX_GCC_FUNC_ATTRIBUTE(\[target\])$" "$php_src_ac"
+              tar czf /tmp/php-src-mirror.tar.gz -C /tmp/php-src-patch "$php_src_top"
+              rm -rf /tmp/php-src-patch
+
               # GNU dependency mirror. Six artifacts in our extension set
               # resolve through spc filelist sources pointed at
               # ftpmirror.gnu.org, which round-robins to volunteer backend
@@ -398,8 +436,14 @@ jobs:
               # (rc18 src/Package/Target/php/unix.php branches on this).
               export SPC_CMD_VAR_PHP_EMBED_TYPE="${EMBED_TYPE:-static}"
 
+              # --dl-custom-url points the build-phase download at the same
+              # (now patched) mirror tarball spc download used. Without it
+              # spc re-resolves php-src to the php.net release and validates
+              # it against the upstream SHA256, which would both discard the
+              # configure.ac patch above and fail the checksum.
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${PHP_VERSION} \
+                --dl-custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
                 --build-embed \
                 ${ZTS_FLAG} \
                 --no-strip \
@@ -480,21 +524,15 @@ jobs:
               # check caught it. x86_64 only: PHP ext/hash has no aarch64
               # equivalent intrinsics.
               if [ "$(uname -m)" = "x86_64" ]; then
-                if grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h; then
-                  echo "==> intrinsics guard: HAVE_FUNC_ATTRIBUTE_TARGET is defined"
-                elif [ "$LIBC" = "musl" ]; then
-                  # Open regression, NOT a new one: alpine x86_64 has shipped
-                  # HAVE_FUNC_ATTRIBUTE_TARGET undefined continuously, from
-                  # 8.3.31 (built before this guard existed) through 8.5.9.
-                  # The CFLAGS override above fixes it on almalinux and not
-                  # here, and nobody has worked out why yet. musl is
-                  # platforms_optional, so warn rather than block the
-                  # release; the glibc tarballs ephpm consumes are asserted.
-                  echo "::warning::musl x86_64 build has HAVE_FUNC_ATTRIBUTE_TARGET undefined - no SHA-NI/PCLMUL/AVX2 resolvers in this tarball"
-                else
-                  echo "::error::HAVE_FUNC_ATTRIBUTE_TARGET is undefined - the CFLAGS override did not take, PHP has no x86 intrinsic resolvers"
+                # Asserted on both libcs since #52: glibc needs the CFLAGS
+                # override above, musl needs the configure.ac patch after
+                # spc download. musl x86_64 shipped this undefined from
+                # 8.3.31 through 8.5.9 as a warning; it is an error now.
+                if ! grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h; then
+                  echo "::error::HAVE_FUNC_ATTRIBUTE_TARGET is undefined - PHP has no x86 intrinsic resolvers (no SHA-NI/PCLMUL/AVX2)"
                   exit 1
                 fi
+                echo "==> intrinsics guard: HAVE_FUNC_ATTRIBUTE_TARGET is defined"
 
                 # PHP 8.4 added the SHA-NI sha256 path (ext/hash/hash_sha.c
                 # gained SHA256_Transform_shani). PHP 8.3 has no such symbol
