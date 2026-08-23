@@ -432,6 +432,30 @@ jobs:
               fi
               cp -RLf "$PHP_INC_DIR" /output/include/php
 
+              # Bundle the container libstdc++.a (musl-flavored on Alpine,
+              # glibc-flavored on Ubuntu) so downstream consumers link
+              # against the same C++ runtime spc used to compile libicu*,
+              # libxml2, etc. PHPs intl extension references C++ symbols
+              # (std::__throw_bad_alloc, __cxa_begin_catch, ICU
+              # UnicodeString ctors, ...). Mixing libstdc++ flavors across
+              # libc boundaries makes downstream binaries either fail to
+              # link or silently mismix C++ runtimes.
+              #
+              # STAGING COMES BEFORE THE GUARDS BELOW, AND MUST STAY THERE.
+              # The guards are set -e assertions: the first one that fails
+              # ends this script, and anything staged after it is silently
+              # missing from the tarball. This block used to be last, so
+              # the x86_64 intrinsics guard failing took libstdc++.a with
+              # it and 8.3.32/8.3.33 shipped unlinkable (issue #49).
+              libstdcxx_path=$(c++ -print-file-name=libstdc++.a)
+              if [ -f "$libstdcxx_path" ]; then
+                cp "$libstdcxx_path" /output/lib/
+                echo "==> Staged libstdc++.a from $libstdcxx_path"
+              else
+                echo "::error::libstdc++.a not found (c++ -print-file-name returned: $libstdcxx_path)"
+                exit 1
+              fi
+
               # Guard: the thread-safety of what we built must match the
               # matrix entry, because the tarball SUFFIX is what tells
               # consumers apart and nothing downstream re-checks. A ZTS
@@ -456,34 +480,53 @@ jobs:
               # check caught it. x86_64 only: PHP ext/hash has no aarch64
               # equivalent intrinsics.
               if [ "$(uname -m)" = "x86_64" ]; then
-                grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h
-                if [ "$SPC_CMD_VAR_PHP_EMBED_TYPE" = "shared" ]; then
-                  # --no-strip keeps the full symtab, so nm sees the
-                  # static-scope transform in the .so as well.
-                  nm /output/lib/libphp.so | grep -q "SHA256_Transform_shani"
-                  echo "==> intrinsics guard passed: SHA-NI transform present in libphp.so"
+                if grep -q "define HAVE_FUNC_ATTRIBUTE_TARGET 1" /output/include/php/main/php_config.h; then
+                  echo "==> intrinsics guard: HAVE_FUNC_ATTRIBUTE_TARGET is defined"
+                elif [ "$LIBC" = "musl" ]; then
+                  # Open regression, NOT a new one: alpine x86_64 has shipped
+                  # HAVE_FUNC_ATTRIBUTE_TARGET undefined continuously, from
+                  # 8.3.31 (built before this guard existed) through 8.5.9.
+                  # The CFLAGS override above fixes it on almalinux and not
+                  # here, and nobody has worked out why yet. musl is
+                  # platforms_optional, so warn rather than block the
+                  # release; the glibc tarballs ephpm consumes are asserted.
+                  echo "::warning::musl x86_64 build has HAVE_FUNC_ATTRIBUTE_TARGET undefined - no SHA-NI/PCLMUL/AVX2 resolvers in this tarball"
                 else
-                  nm /output/lib/libphp.a | grep -q "SHA256_Transform_shani"
-                  echo "==> intrinsics guard passed: SHA-NI transform present in libphp.a"
+                  echo "::error::HAVE_FUNC_ATTRIBUTE_TARGET is undefined - the CFLAGS override did not take, PHP has no x86 intrinsic resolvers"
+                  exit 1
+                fi
+
+                # PHP 8.4 added the SHA-NI sha256 path (ext/hash/hash_sha.c
+                # gained SHA256_Transform_shani). PHP 8.3 has no such symbol
+                # at any CFLAGS, so asserting it there always fails: that is
+                # what killed the 8.3.32 and 8.3.33 x86_64 builds mid-script.
+                php_major=${PHP_VERSION%%.*}
+                php_rest=${PHP_VERSION#*.}
+                php_minor=${php_rest%%.*}
+                if [ "$php_major" -gt 8 ] || { [ "$php_major" -eq 8 ] && [ "$php_minor" -ge 4 ]; }; then
+                  if [ "$SPC_CMD_VAR_PHP_EMBED_TYPE" = "shared" ]; then
+                    # --no-strip keeps the full symtab, so nm sees the
+                    # static-scope transform in the .so as well.
+                    nm /output/lib/libphp.so | grep -q "SHA256_Transform_shani"
+                    echo "==> intrinsics guard passed: SHA-NI transform present in libphp.so"
+                  else
+                    nm /output/lib/libphp.a | grep -q "SHA256_Transform_shani"
+                    echo "==> intrinsics guard passed: SHA-NI transform present in libphp.a"
+                  fi
+                else
+                  echo "==> intrinsics guard: skipping SHA-NI symbol check, PHP ${PHP_VERSION} predates it"
                 fi
               fi
 
-              # Bundle the container libstdc++.a (musl-flavored on Alpine,
-              # glibc-flavored on Ubuntu) so downstream consumers link
-              # against the same C++ runtime spc used to compile libicu*,
-              # libxml2, etc. PHPs intl extension references C++ symbols
-              # (std::__throw_bad_alloc, __cxa_begin_catch, ICU
-              # UnicodeString ctors, ...). Mixing libstdc++ flavors across
-              # libc boundaries makes downstream binaries either fail to
-              # link or silently mismix C++ runtimes.
-              libstdcxx_path=$(c++ -print-file-name=libstdc++.a)
-              if [ -f "$libstdcxx_path" ]; then
-                cp "$libstdcxx_path" /output/lib/
-                echo "==> Staged libstdc++.a from $libstdcxx_path"
-              else
-                echo "::error::libstdc++.a not found (c++ -print-file-name returned: $libstdcxx_path)"
-                exit 1
-              fi
+              # Completion sentinel, and it must remain the last statement
+              # here. A container whose script aborts does NOT fail this
+              # job: docker run returning non-zero does not stop the step.
+              # Run 31069327889 went on to docker cp after the container
+              # died in dnf, and only failed because /output did not exist
+              # yet. Once /output exists, an aborted script produces a
+              # green job and a short tarball instead. Package SDK checks
+              # for this file.
+              touch /output/.build-complete
 
             '
 
@@ -500,8 +543,28 @@ jobs:
 
       - name: Package SDK
         run: |
+          # Guard: the container script ran to completion. Nothing else in
+          # this job checks that -- see the sentinel comment in the build
+          # step. Without this, any set -e assertion inside the container
+          # silently truncates the tarball at the point it fired.
+          if [ ! -f output/.build-complete ]; then
+            echo "::error::the container staging script did not finish (no /output/.build-complete) - inspect the previous step for the assertion that aborted it"
+            exit 1
+          fi
+          rm -f output/.build-complete
+
           mkdir -p sdk
           cp -r output/* sdk/
+
+          # Guard: ICU is C++. A tarball carrying libicuuc.a but no
+          # libstdc++.a cannot be linked statically by a consumer -- it dies
+          # on operator new, __cxa_begin_catch, __gxx_personality_v0. That
+          # exact pair shipped in 8.3.32 and 8.3.33 x86_64 and cost three
+          # weeks (issue #49), so assert the pair rather than either file.
+          if [ -f sdk/lib/libicuuc.a ] && [ ! -f sdk/lib/libstdc++.a ]; then
+            echo "::error::sdk/lib has libicuuc.a but no libstdc++.a - consumers cannot resolve ICU's C++ runtime symbols"
+            exit 1
+          fi
 
           # Guard: the staged headers must be the PHP version this run was
           # asked to build. spc has silently fallen back to "latest stable"
