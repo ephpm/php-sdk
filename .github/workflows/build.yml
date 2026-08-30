@@ -40,6 +40,18 @@ on:
         required: false
         type: string
         default: ""
+      php_src_url:
+        description: "Override URL for the php-src tarball. REQUIRED to build a
+          PRE-RELEASE (beta/RC): spc's php.net resolver only knows GA versions,
+          and its --with-php regex rejects non-numeric strings like
+          8.6.0beta1. When set, every OS leg fetches php-src from this URL and
+          hands it to spc via --custom-url/--custom-local (bypassing spc's GA
+          resolver), while --with-php gets the numeric major.minor.
+          e.g. https://downloads.php.net/~svpernova09/php-8.6.0beta1.tar.gz .
+          Leave empty for GA builds (spc resolves php-src itself)."
+        required: false
+        type: string
+        default: ""
 
 env:
   SPC_VERSION: "v3.0.0-pgo-rc19"
@@ -101,11 +113,42 @@ jobs:
       build-macos: ${{ steps.compute.outputs.build-macos }}
       build-windows: ${{ steps.compute.outputs.build-windows }}
       build-windows-clang: ${{ steps.compute.outputs.build-windows-clang }}
+      # The value handed to spc's --with-php / --dl-with-php. spc's version
+      # regex accepts only x.y or x.y.z, so a pre-release php_version
+      # (e.g. 8.6.0beta1) is reduced to its numeric major.minor (8.6). A GA
+      # x.y.z is passed through verbatim so the existing pinned-patch behaviour
+      # (macOS/Windows resolve the exact patch via spc) is unchanged.
+      spc-version: ${{ steps.compute.outputs.spc-version }}
+      # "true" when php_version is not a bare x.y.z GA string.
+      prerelease: ${{ steps.compute.outputs.prerelease }}
     steps:
       - id: compute
         env:
           PLATFORM: ${{ inputs.platform }}
+          PHP_VERSION: ${{ inputs.php_version }}
+          PHP_SRC_URL: ${{ inputs.php_src_url }}
         run: |
+          # Classify the requested version. A GA release is exactly x.y.z
+          # (all-numeric); anything else (8.6.0beta1, 8.6.0RC1) is a
+          # pre-release. spc's --with-php rejects the non-numeric form, so
+          # pre-releases pass major.minor and MUST supply php-src out-of-band
+          # via php_src_url (spc's php.net resolver is GA-only).
+          if printf '%s' "$PHP_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "spc-version=$PHP_VERSION" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            mm=$(printf '%s' "$PHP_VERSION" | grep -oE '^[0-9]+\.[0-9]+')
+            if [ -z "$mm" ]; then
+              echo "::error::php_version '$PHP_VERSION' has no numeric major.minor prefix"
+              exit 1
+            fi
+            if [ -z "$PHP_SRC_URL" ]; then
+              echo "::error::php_version '$PHP_VERSION' is a pre-release but php_src_url is empty -- spc cannot resolve a non-GA php-src. Pass php_src_url (e.g. the downloads.php.net/~RM/ beta tarball)."
+              exit 1
+            fi
+            echo "spc-version=$mm" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
           # Each Linux matrix entry picks a libc flavor via the container
           # image: Alpine's native gcc links against musl (static-friendly).
           # The gnu flavor builds on almalinux:8 (glibc 2.28) with GCC 13 from
@@ -213,6 +256,8 @@ jobs:
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
+            -e SPC_WITH_PHP="${{ needs.setup.outputs.spc-version }}" \
+            -e PHP_SRC_URL="${{ inputs.php_src_url }}" \
             -e PHP_EXTENSIONS="${{ env.PHP_EXTENSIONS }}${{ matrix.extra }}" \
             -e LIBC="${{ matrix.libc }}" \
             -e ENABLE_ZTS="${{ matrix.zts }}" \
@@ -306,12 +351,23 @@ jobs:
               # failed on the release-asset redirect from the runner (curl
               # exit 22, run 28761831602) while plain curl succeeds. Refresh
               # the mirror when bumping pinned PHP versions.
+              # php-src source: a GA build pulls the pinned tarball from our
+              # php-sources mirror (fleet egress to php.net is unreliable). A
+              # pre-release build (PHP_SRC_URL set) pulls the beta/RC tarball
+              # from that URL instead -- watch-php.yml only mirrors GA, and
+              # spc's own resolver is GA-only. Either way the tarball lands at
+              # /tmp/php-src-mirror.tar.gz and flows through the same patch +
+              # --custom-url path below.
+              if [ -n "${PHP_SRC_URL:-}" ]; then
+                php_src_fetch_url="${PHP_SRC_URL}"
+              else
+                php_src_fetch_url="https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"
+              fi
               j=0
-              until curl -fsSL -o /tmp/php-src-mirror.tar.gz \
-                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"; do
+              until curl -fsSL -o /tmp/php-src-mirror.tar.gz "${php_src_fetch_url}"; do
                 j=$((j + 1))
                 if [ "$j" -ge 5 ]; then
-                  echo "mirror fetch failed after $j attempts" >&2
+                  echo "php-src fetch failed after $j attempts (${php_src_fetch_url})" >&2
                   exit 1
                 fi
                 sleep 3
@@ -394,7 +450,7 @@ jobs:
 
               i=0
               until spc download \
-                  --with-php=${PHP_VERSION} \
+                  --with-php=${SPC_WITH_PHP} \
                   --for-extensions=${PHP_EXTENSIONS} \
                   --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
                   ${CUSTOM_URLS} \
@@ -442,7 +498,7 @@ jobs:
               # it against the upstream SHA256, which would both discard the
               # configure.ac patch above and fail the checksum.
               spc build ${PHP_EXTENSIONS} \
-                --dl-with-php=${PHP_VERSION} \
+                --dl-with-php=${SPC_WITH_PHP} \
                 --dl-custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
                 --build-embed \
                 ${ZTS_FLAG} \
@@ -735,12 +791,25 @@ jobs:
             echo "::warning::no gnu-deps-manifest.txt on the php-sources release tag - falling back to upstream GNU mirrors, which are the known failure mode. Run mirror-deps.yml to populate it."
           fi
 
+          # Pre-release (beta/RC): spc's php.net resolver is GA-only, so fetch
+          # php-src from the override URL and hand it to spc via --custom-url.
+          # GA builds leave PHP_SRC_URL empty and let spc resolve the exact
+          # pinned patch as before.
+          if [ -n "${PHP_SRC_URL}" ]; then
+            if ! curl -fsSL -o /tmp/php-src-beta.tar.gz "${PHP_SRC_URL}"; then
+              echo "::error::failed to fetch php-src from ${PHP_SRC_URL}"
+              exit 1
+            fi
+            CUSTOM_URLS="${CUSTOM_URLS} --custom-url=php-src:file:///tmp/php-src-beta.tar.gz"
+            echo "==> php-src overridden from ${PHP_SRC_URL}"
+          fi
+
           i=0
           # shellcheck disable=SC2086 # CUSTOM_URLS must word-split into one
           # --custom-url= argument per mirrored dependency; quoting it would
           # pass the whole list as a single argument.
           until spc download \
-              --with-php=${{ inputs.php_version }} \
+              --with-php=${{ needs.setup.outputs.spc-version }} \
               --for-extensions=${{ env.PHP_EXTENSIONS }} \
               ${CUSTOM_URLS} \
               --prefer-pre-built; do
@@ -755,8 +824,11 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PHP_SRC_URL: ${{ inputs.php_src_url }}
 
       - name: Build libphp.a
+        env:
+          PHP_SRC_URL: ${{ inputs.php_src_url }}
         run: |
           # PHP < 8.4 uses K&R function declarations removed in C23.
           # Homebrew LLVM/clang defaults to -std=gnu23, so force gnu17.
@@ -764,10 +836,19 @@ jobs:
           if [ "$php_minor" -lt 4 ]; then
             export CFLAGS="-std=gnu17"
           fi
+          # The build phase runs its own downloader pass (--dl-*); for a
+          # pre-release it must re-point php-src at the same override tarball
+          # the download step fetched, or spc re-resolves to the GA feed.
+          DL_PHP_SRC=""
+          if [ -n "${PHP_SRC_URL}" ]; then
+            DL_PHP_SRC="--dl-custom-url=php-src:file:///tmp/php-src-beta.tar.gz"
+          fi
           # --dl-with-php pins the build-phase downloader to the requested
           # version (see linux build for the incident this prevents).
+          # shellcheck disable=SC2086 # DL_PHP_SRC is one optional argument.
           spc build ${{ env.PHP_EXTENSIONS }} \
-            --dl-with-php=${{ inputs.php_version }} \
+            --dl-with-php=${{ needs.setup.outputs.spc-version }} \
+            ${DL_PHP_SRC} \
             --build-embed \
             --enable-zts \
             --no-strip \
@@ -993,6 +1074,36 @@ jobs:
           Invoke-WebRequest -Uri "https://github.com/luthermonson/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-windows-x64.exe" -OutFile spc.exe
           "$PWD" | Out-File -Append -FilePath $env:GITHUB_PATH
 
+      - name: Prepare pre-release php-src (beta/RC only)
+        shell: powershell
+        # spc's php.net resolver is GA-only and its --with-php regex rejects a
+        # non-numeric string, so a pre-release build feeds php-src in via
+        # --custom-local (a directory spc uses in place). GA builds
+        # (php_src_url empty) skip this entirely and let spc resolve php-src.
+        # Same mechanism the clang lane already uses; here the source is the
+        # override tarball rather than a git clone so all OSes share one input.
+        env:
+          PHP_SRC_URL: ${{ inputs.php_src_url }}
+        run: |
+          if ([string]::IsNullOrEmpty($env:PHP_SRC_URL)) {
+            Write-Host "GA build: no php_src_url, spc will resolve php-src"
+            exit 0
+          }
+          $dest = "$PWD\php-src-beta"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          & "$env:SystemRoot\System32\curl.exe" -fSL --retry 3 --retry-delay 5 --max-time 600 -o php-src-beta.tar.gz $env:PHP_SRC_URL
+          if ($LASTEXITCODE -ne 0) { Write-Error "php-src fetch failed (curl exit $LASTEXITCODE)"; exit 1 }
+          # bsdtar (System32) strips the single top-level php-src-<ver>/ dir so
+          # $dest is the source root spc's --custom-local expects.
+          & "$env:SystemRoot\System32\tar.exe" -xf php-src-beta.tar.gz -C $dest --strip-components=1
+          if (-not (Test-Path "$dest\win32\build\config.w32")) {
+            Write-Error "extracted php-src looks wrong: $dest\win32\build\config.w32 missing"
+            exit 1
+          }
+          "PHP_SRC_LOCAL=$dest" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "==> php-src overridden from $env:PHP_SRC_URL -> $dest"
+
       - name: Download PHP sources
         shell: powershell
         # This leg used to fail on "Failed to get GitHub release API info for
@@ -1027,11 +1138,14 @@ jobs:
             # rather than dropping it, and Symfony Console rejects that.
             $spcArgs = @(
               'download',
-              '--with-php=${{ inputs.php_version }}',
+              '--with-php=${{ needs.setup.outputs.spc-version }}',
               '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
               '--retry=3',
               '--prefer-pre-built'
             )
+            if (-not [string]::IsNullOrEmpty($env:PHP_SRC_LOCAL)) {
+              $spcArgs += @('--custom-local', "php-src:$env:PHP_SRC_LOCAL")
+            }
             if ($i -eq $max) { $spcArgs += '-vv' }
             spc @spcArgs
             if ($LASTEXITCODE -eq 0) { break }
@@ -1085,14 +1199,18 @@ jobs:
             $env:PATH = "$($spDir.FullName)\perl\bin;$env:PATH"
             Write-Host "Strawberry Perl active: $(& perl.exe -v 2>&1 | Select-String 'MSWin32|version')"
           }
-          # --dl-with-php pins the build-phase downloader to the requested
-          # version (see linux build for the incident this prevents).
-          spc build ${{ env.WIN_PHP_EXTENSIONS }} `
-            --dl-with-php=${{ inputs.php_version }} `
-            --build-embed `
-            --enable-zts `
-            --no-strip `
-            --debug
+          # The build phase re-runs the downloader (--dl-*); a pre-release must
+          # re-point php-src at the same --custom-local dir the download step
+          # used or spc re-resolves to the GA feed.
+          $spcArgs = @(
+            'build', '${{ env.WIN_PHP_EXTENSIONS }}',
+            '--dl-with-php=${{ needs.setup.outputs.spc-version }}',
+            '--build-embed', '--enable-zts', '--no-strip', '--debug'
+          )
+          if (-not [string]::IsNullOrEmpty($env:PHP_SRC_LOCAL)) {
+            $spcArgs += @('--dl-custom-local', "php-src:$env:PHP_SRC_LOCAL")
+          }
+          spc @spcArgs
 
       - name: Find build outputs
         shell: powershell
@@ -1551,7 +1669,7 @@ jobs:
           for ($i = 1; $i -le $max; $i++) {
             $spcArgs = @(
               'download',
-              '--with-php=${{ inputs.php_version }}',
+              '--with-php=${{ needs.setup.outputs.spc-version }}',
               '--for-extensions=${{ env.WIN_PHP_EXTENSIONS }}',
               '--retry=3',
               '--prefer-pre-built',
@@ -1606,7 +1724,7 @@ jobs:
           # silently replacing the patched tree with the stock tarball.
           $phpSrc = "$PWD\php-src-clang"
           spc build ${{ env.WIN_PHP_EXTENSIONS }} `
-            --dl-with-php=${{ inputs.php_version }} `
+            --dl-with-php=${{ needs.setup.outputs.spc-version }} `
             --dl-custom-local "php-src:$phpSrc" `
             --dl-custom-local "gettext-win:$PWD\gettext-win-src" `
             --dl-custom-local "libiconv-win:$PWD\libiconv-win-src" `
@@ -1776,7 +1894,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build-linux, build-macos, build-windows, build-windows-clang]
+    needs: [setup, build-linux, build-macos, build-windows, build-windows-clang]
     # Partial rebuilds skip the un-targeted build jobs (skipped != failure),
     # but a real failure should still abort the release.
     if: |
@@ -1810,6 +1928,9 @@ jobs:
         with:
           tag_name: v${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
           name: PHP ${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
+          # A pre-release SDK (beta/RC) is marked prerelease so GitHub never
+          # promotes it to "Latest" over a GA SDK tag.
+          prerelease: ${{ needs.setup.outputs.prerelease == 'true' }}
           body: |
             Pre-built PHP embed SAPI SDK for ephpm.
 
