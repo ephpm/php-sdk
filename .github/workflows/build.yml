@@ -355,7 +355,7 @@ jobs:
               # php-sources mirror (fleet egress to php.net is unreliable). A
               # pre-release build (PHP_SRC_URL set) pulls the beta/RC tarball
               # from that URL instead -- watch-php.yml only mirrors GA, and
-              # spc's own resolver is GA-only. Either way the tarball lands at
+              # the spc resolver is GA-only. Either way the tarball lands at
               # /tmp/php-src-mirror.tar.gz and flows through the same patch +
               # --custom-url path below.
               if [ -n "${PHP_SRC_URL:-}" ]; then
