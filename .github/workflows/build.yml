@@ -261,9 +261,19 @@ jobs:
           # SPC_MICRO_PATCHES (GlobalEnvManager honours a pre-set env over
           # env.ini). GA is left untouched: its default patches select the
           # matching *_85 (etc.) file and apply cleanly.
-          MICRO_ENV=()
+          #
+          # Also override SPC_CMD_PREFIX_PHP_CONFIGURE: spc's env.ini default
+          # ends in --with-pic, which PHP 8.6 removed in favour of --enable-pic
+          # (./configure hard-errors: "The Libtool --with-pic/--without-pic
+          # configure option is obsolete"). spc reads this prefix via getenv, so
+          # a pre-set value wins. Same string as the env.ini default with the
+          # one token swapped; no ${} interpolation in the default.
+          PRERELEASE_ENV=()
           if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
-            MICRO_ENV=(-e "SPC_MICRO_PATCHES=")
+            PRERELEASE_ENV=(
+              -e "SPC_MICRO_PATCHES="
+              -e "SPC_CMD_PREFIX_PHP_CONFIGURE=./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
+            )
           fi
           docker run --name "spc-build-${{ matrix.variant }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
@@ -276,7 +286,7 @@ jobs:
             -e ENABLE_ZTS="${{ matrix.zts }}" \
             -e EMBED_TYPE="${{ matrix.embed }}" \
             -e SPC_OPCACHE_EXTRA_SAPIS="${{ env.SPC_OPCACHE_EXTRA_SAPIS }}" \
-            "${MICRO_ENV[@]}" \
+            "${PRERELEASE_ENV[@]}" \
             "${{ matrix.image }}" sh -c '
               set -eux
 
@@ -857,6 +867,10 @@ jobs:
           # GA untouched.
           if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
             export SPC_MICRO_PATCHES=macos_iconv
+            # PHP 8.6 removed --with-pic (env.ini default) for --enable-pic;
+            # spc reads this prefix via getenv, so a pre-set value wins. Same as
+            # the env.ini default with the one token swapped.
+            export SPC_CMD_PREFIX_PHP_CONFIGURE="./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
           fi
           # The build phase runs its own downloader pass (--dl-*); for a
           # pre-release it must re-point php-src at the same override tarball
