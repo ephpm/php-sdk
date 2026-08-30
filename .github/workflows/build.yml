@@ -252,6 +252,19 @@ jobs:
         # ephpm's dynamic Linux binaries link so PHP can dlopen shared
         # extensions at runtime). Same spc invocation either way.
         run: |
+          # Pre-release only: spc's micro-patch version selector
+          # (SourcePatcher::patchPhpSrc, $serial = 80..85) has no 8.6 entry and
+          # mis-resolves to the *_80 patch, whose context does not match the 8.6
+          # tree -- buildconf then hard-fails ("cli_checks_80.patch failed to
+          # apply"). cli_checks/disable_huge_page are micro-SAPI-only and are
+          # not needed for a --build-embed build, so force an empty
+          # SPC_MICRO_PATCHES (GlobalEnvManager honours a pre-set env over
+          # env.ini). GA is left untouched: its default patches select the
+          # matching *_85 (etc.) file and apply cleanly.
+          MICRO_ENV=()
+          if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
+            MICRO_ENV=(-e "SPC_MICRO_PATCHES=")
+          fi
           docker run --name "spc-build-${{ matrix.variant }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
@@ -263,6 +276,7 @@ jobs:
             -e ENABLE_ZTS="${{ matrix.zts }}" \
             -e EMBED_TYPE="${{ matrix.embed }}" \
             -e SPC_OPCACHE_EXTRA_SAPIS="${{ env.SPC_OPCACHE_EXTRA_SAPIS }}" \
+            "${MICRO_ENV[@]}" \
             "${{ matrix.image }}" sh -c '
               set -eux
 
@@ -835,6 +849,14 @@ jobs:
           php_minor=$(echo "${{ inputs.php_version }}" | cut -d. -f2)
           if [ "$php_minor" -lt 4 ]; then
             export CFLAGS="-std=gnu17"
+          fi
+          # Pre-release only: same spc micro-patch selector bug as Linux (no 8.6
+          # entry -> mis-resolves to *_80 and fails buildconf). The macOS default
+          # is "cli_checks,macos_iconv"; cli_checks is micro-only, but macos_iconv
+          # IS needed for embed (libiconv symbol-prefix fix), so keep only that.
+          # GA untouched.
+          if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
+            export SPC_MICRO_PATCHES=macos_iconv
           fi
           # The build phase runs its own downloader pass (--dl-*); for a
           # pre-release it must re-point php-src at the same override tarball
@@ -1897,11 +1919,19 @@ jobs:
     needs: [setup, build-linux, build-macos, build-windows, build-windows-clang]
     # Partial rebuilds skip the un-targeted build jobs (skipped != failure),
     # but a real failure should still abort the release.
+    #
+    # Windows is exempted for a PRE-RELEASE: spc (v3.0.0-pgo-rc19) cannot build
+    # 8.6 on Windows -- its static_extensions_win32 patch mis-resolves to the
+    # *_80 variant (no 8.6 entry in the selector) and cannot be dropped the way
+    # the Linux/macOS micro patches can, because the Windows static build needs
+    # it. So a prerelease still publishes its Linux+macOS tarballs while Windows
+    # is blocked pending an spc-fork rebuild. GA keeps gating on Windows.
     if: |
       always()
       && needs.build-linux.result   != 'failure'
       && needs.build-macos.result   != 'failure'
-      && needs.build-windows.result != 'failure'
+      && (needs.build-windows.result != 'failure'
+          || needs.setup.outputs.prerelease == 'true')
       && needs.build-windows-clang.result != 'failure'
     runs-on: [self-hosted, linux, x64]
     permissions:
@@ -1991,6 +2021,7 @@ jobs:
           PHP_VERSION: ${{ inputs.php_version }}
           RELEASE_TAG: v${{ inputs.php_version }}${{ inputs.release_tag_suffix }}
           PLATFORM: ${{ inputs.platform }}
+          PRERELEASE: ${{ needs.setup.outputs.prerelease }}
         with:
           script: |
             const fs = require('fs');
@@ -1998,6 +2029,11 @@ jobs:
             const version = process.env.PHP_VERSION;
             const tag = process.env.RELEASE_TAG;
             const platform = process.env.PLATFORM || 'all';
+            // A pre-release (beta/RC) may legitimately ship without every
+            // required platform -- Windows 8.6 is blocked on an spc-fork
+            // rebuild (see the release job's `if:`), so a missing required
+            // tarball is a warning, not a hard failure, for a prerelease.
+            const prerelease = process.env.PRERELEASE === 'true';
 
             const release = await github.rest.repos.getReleaseByTag({
               owner: context.repo.owner,
@@ -2022,6 +2058,13 @@ jobs:
 
             if (platform === 'all') {
               if (missingRequired.length > 0) {
+                if (prerelease) {
+                  core.warning(
+                    `prerelease ${tag} is missing required platform(s): ${missingRequired.join(', ')} ` +
+                    `(expected for a beta -- e.g. Windows 8.6 is blocked on an spc-fork rebuild).`,
+                  );
+                  return;
+                }
                 core.setFailed(
                   `release ${tag} is INCOMPLETE -- missing required platform(s): ${missingRequired.join(', ')}. ` +
                   `Re-dispatch build.yml per missing platform to backfill.`,
