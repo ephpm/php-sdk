@@ -156,6 +156,28 @@ gh workflow run build.yml -f php_version=8.5.2 -f platform=linux-aarch64-gnu
 gh workflow run build.yml -f php_version=8.4.23 -f platform=linux-x86_64-gnu-nts
 ```
 
+### Pre-release (beta/RC) builds
+
+static-php-cli resolves `php-src` from php.net's **GA-only** release feed, and
+its `--with-php` accepts only numeric `x.y`/`x.y.z`. So a beta/RC cannot go
+through the normal path. Set `php_src_url` to the upstream pre-release tarball
+(the release manager's QA dir, `downloads.php.net/~<RM>/`); every OS leg then
+fetches `php-src` from that URL and hands it to spc via `--custom-url`/
+`--custom-local`, while `--with-php` gets the numeric `major.minor`. The
+resulting release tag (`v<php_version>`) is marked **prerelease**.
+
+```bash
+gh workflow run build.yml \
+  -f php_version=8.6.0beta1 -f platform=all \
+  -f php_src_url=https://downloads.php.net/~svpernova09/php-8.6.0beta1.tar.gz
+```
+
+Betas are **not** added to `versions.json` `minors` (watch-php.yml polls the GA
+feed and would error on a non-GA minor) and never gate a stable release. This
+lane is experimental: no spc release has explicit 8.6 support — it builds
+because spc has no upper-version cap and reads the real `PHP_VERSION_ID` from
+the supplied source. The Windows embed leg for a brand-new beta is unproven.
+
 **Any dispatch from a branch other than `main` MUST set `release_tag_suffix`.** On 2026-07-13 a validation build from a side branch uploaded to the plain `v8.5.7` tag and overwrote four production assets. The input exists to make that impossible:
 
 ```bash
