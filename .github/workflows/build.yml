@@ -252,22 +252,13 @@ jobs:
         # ephpm's dynamic Linux binaries link so PHP can dlopen shared
         # extensions at runtime). Same spc invocation either way.
         run: |
-          # Pre-release only: spc's micro-patch version selector
-          # (SourcePatcher::patchPhpSrc, $serial = 80..85) has no 8.6 entry and
-          # mis-resolves to the *_80 patch, whose context does not match the 8.6
-          # tree -- buildconf then hard-fails ("cli_checks_80.patch failed to
-          # apply"). cli_checks/disable_huge_page are micro-SAPI-only and are
-          # not needed for a --build-embed build, so force an empty
-          # SPC_MICRO_PATCHES (GlobalEnvManager honours a pre-set env over
-          # env.ini). GA is left untouched: its default patches select the
-          # matching *_85 (etc.) file and apply cleanly.
-          #
-          # Also override SPC_CMD_PREFIX_PHP_CONFIGURE: spc's env.ini default
-          # ends in --with-pic, which PHP 8.6 removed in favour of --enable-pic
-          # (./configure hard-errors: "The Libtool --with-pic/--without-pic
-          # configure option is obsolete"). spc reads this prefix via getenv, so
-          # a pre-set value wins. Same string as the env.ini default with the
-          # one token swapped; no ${} interpolation in the default.
+          # Pre-release (8.6) spc rc19 workarounds; GA untouched. See PRs
+          # #56/#57/#59. (1) SPC_MICRO_PATCHES empty: the patch selector has no
+          # 8.6 entry and mis-resolves to *_80, which fails; cli_checks etc. are
+          # micro-only, unneeded for embed. (2) SPC_CMD_PREFIX_PHP_CONFIGURE: the
+          # env.ini default ends in --with-pic (removed in 8.6); swap to
+          # --enable-pic. (3) SPC_EXTRA_BUILD_SAPI=--build-cli: 8.6 embed needs
+          # CLI. spc reads all three via getenv, so a pre-set value wins.
           PRERELEASE_ENV=()
           if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
             PRERELEASE_ENV=(
@@ -522,12 +513,8 @@ jobs:
               # spc re-resolves php-src to the php.net release and validates
               # it against the upstream SHA256, which would both discard the
               # configure.ac patch above and fail the checksum.
-              # SPC_EXTRA_BUILD_SAPI adds --build-cli for a pre-release: PHP 8.6
-              # forbids --disable-cli with --enable-embed, and spc emits
-              # --disable-cli unless php-cli is a resolved package (isPackage
-              # Resolved('php-cli') in configureForUnix). Resolving php-cli
-              # flips it to --enable-cli; the extra cli SAPI is harmless (only
-              # libphp.a is packaged). Empty on GA. :- guards set -u.
+              # SPC_EXTRA_BUILD_SAPI (--build-cli on prerelease) -- see the
+              # PRERELEASE_ENV comment above. :- guards set -u.
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${SPC_WITH_PHP} \
                 --dl-custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
