@@ -857,11 +857,15 @@ jobs:
           fi
           # Pre-release only: same spc micro-patch selector bug as Linux (no 8.6
           # entry -> mis-resolves to *_80 and fails buildconf). The macOS default
-          # is "cli_checks,macos_iconv"; cli_checks is micro-only, but macos_iconv
-          # IS needed for embed (libiconv symbol-prefix fix), so keep only that.
-          # GA untouched.
+          # is "cli_checks,macos_iconv"; both only ship *_80.._84, so both
+          # mis-resolve on 8.6. Empty the set (spc's bundled patches can't be
+          # overridden per-file from the workflow). iconv is still linked via
+          # --with-iconv=buildroot -- x86_64 Linux built clean with no micro
+          # patches, so macos_iconv is not required for the embed lib. GA
+          # untouched. (If a macOS iconv symbol issue surfaces at consumer link
+          # time, it needs an spc-fork 8.6 macos_iconv patch, not a workflow fix.)
           if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
-            export SPC_MICRO_PATCHES=macos_iconv
+            export SPC_MICRO_PATCHES=
             # PHP 8.6 removed --with-pic (env.ini default) for --enable-pic;
             # spc reads this prefix via getenv, so a pre-set value wins. Same as
             # the env.ini default with the one token swapped.
