@@ -1939,22 +1939,26 @@ jobs:
   release:
     name: Create Release
     needs: [setup, build-linux, build-macos, build-windows, build-windows-clang]
-    # Partial rebuilds skip the un-targeted build jobs (skipped != failure),
-    # but a real failure should still abort the release.
+    # GA: every leg must succeed (partial rebuilds skip un-targeted jobs;
+    # skipped != failure, but a real failure aborts the release).
     #
-    # Windows is exempted for a PRE-RELEASE: spc (v3.0.0-pgo-rc19) cannot build
-    # 8.6 on Windows -- its static_extensions_win32 patch mis-resolves to the
-    # *_80 variant (no 8.6 entry in the selector) and cannot be dropped the way
-    # the Linux/macOS micro patches can, because the Windows static build needs
-    # it. So a prerelease still publishes its Linux+macOS tarballs while Windows
-    # is blocked pending an spc-fork rebuild. GA keeps gating on Windows.
+    # PRE-RELEASE: publish from whatever succeeded. An 8.6 beta legitimately
+    # has failing legs that must NOT block the others: Windows is a hard
+    # spc-fork wall (static_extensions_win32 mis-resolves to *_80), and a
+    # linux-aarch64 matrix leg can die on ephemerd-fleet INFRA (runner death,
+    # disk-full) while x86_64 + macOS build clean off the same code. build-linux
+    # is one matrix job, so one dead aarch64 leg fails the whole job's result --
+    # which is why gating on build-linux.result != 'failure' wrongly skipped the
+    # publish. download-artifact collects whatever legs uploaded, the
+    # completeness check (prerelease) warns instead of failing on the missing
+    # platforms, and "List artifacts" guards against a zero-artifact publish.
     if: |
       always()
-      && needs.build-linux.result   != 'failure'
-      && needs.build-macos.result   != 'failure'
-      && (needs.build-windows.result != 'failure'
-          || needs.setup.outputs.prerelease == 'true')
-      && needs.build-windows-clang.result != 'failure'
+      && ( needs.setup.outputs.prerelease == 'true'
+           || ( needs.build-linux.result   != 'failure'
+                && needs.build-macos.result   != 'failure'
+                && needs.build-windows.result != 'failure'
+                && needs.build-windows-clang.result != 'failure' ) )
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
