@@ -273,6 +273,7 @@ jobs:
             PRERELEASE_ENV=(
               -e "SPC_MICRO_PATCHES="
               -e "SPC_CMD_PREFIX_PHP_CONFIGURE=./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
+              -e "SPC_EXTRA_BUILD_SAPI=--build-cli"
             )
           fi
           docker run --name "spc-build-${{ matrix.variant }}" \
@@ -521,9 +522,16 @@ jobs:
               # spc re-resolves php-src to the php.net release and validates
               # it against the upstream SHA256, which would both discard the
               # configure.ac patch above and fail the checksum.
+              # SPC_EXTRA_BUILD_SAPI adds --build-cli for a pre-release: PHP 8.6
+              # forbids --disable-cli with --enable-embed, and spc emits
+              # --disable-cli unless php-cli is a resolved package (isPackage
+              # Resolved('php-cli') in configureForUnix). Resolving php-cli
+              # flips it to --enable-cli; the extra cli SAPI is harmless (only
+              # libphp.a is packaged). Empty on GA. :- guards set -u.
               spc build ${PHP_EXTENSIONS} \
                 --dl-with-php=${SPC_WITH_PHP} \
                 --dl-custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                ${SPC_EXTRA_BUILD_SAPI:-} \
                 --build-embed \
                 ${ZTS_FLAG} \
                 --no-strip \
@@ -872,6 +880,14 @@ jobs:
             # the env.ini default with the one token swapped.
             export SPC_CMD_PREFIX_PHP_CONFIGURE="./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
           fi
+          # Pre-release only: PHP 8.6 forbids --disable-cli with --enable-embed,
+          # and spc emits --disable-cli unless php-cli is a resolved package, so
+          # add --build-cli to flip it to --enable-cli. The extra cli SAPI is
+          # harmless (only libphp.a is packaged). Empty on GA.
+          BUILD_SAPI_EXTRA=""
+          if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
+            BUILD_SAPI_EXTRA="--build-cli"
+          fi
           # The build phase runs its own downloader pass (--dl-*); for a
           # pre-release it must re-point php-src at the same override tarball
           # the download step fetched, or spc re-resolves to the GA feed.
@@ -881,10 +897,11 @@ jobs:
           fi
           # --dl-with-php pins the build-phase downloader to the requested
           # version (see linux build for the incident this prevents).
-          # shellcheck disable=SC2086 # DL_PHP_SRC is one optional argument.
+          # shellcheck disable=SC2086 # DL_PHP_SRC/BUILD_SAPI_EXTRA are single optional args.
           spc build ${{ env.PHP_EXTENSIONS }} \
             --dl-with-php=${{ needs.setup.outputs.spc-version }} \
             ${DL_PHP_SRC} \
+            ${BUILD_SAPI_EXTRA} \
             --build-embed \
             --enable-zts \
             --no-strip \
