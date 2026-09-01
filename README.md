@@ -16,6 +16,8 @@ Built with [static-php-cli](https://github.com/crazywhalecc/static-php-cli) — 
 | Windows x86_64 | `-windows-x86_64` | `lib/php8embed.lib` + dep `.lib`s + headers, ZTS |
 | Linux x86_64 (glibc, **NTS**) | `-linux-x86_64-gnu-nts` | `lib/libphp.a` + headers, non-thread-safe |
 | Linux aarch64 (glibc, **NTS**) | `-linux-aarch64-gnu-nts` | `lib/libphp.a` + headers, non-thread-safe |
+| Linux x86_64 (glibc, **NTS**, shared embed) | `-linux-x86_64-gnu-nts-shared` | `lib/libphp.so` (dependencies linked in) + headers, non-thread-safe |
+| Linux aarch64 (glibc, **NTS**, shared embed) | `-linux-aarch64-gnu-nts-shared` | `lib/libphp.so` (dependencies linked in) + headers, non-thread-safe |
 | Windows x86_64 (**experimental**, clang-cl + TAILCALL VM) | `-windows-x86_64-clang` | `lib/php8embed.lib` + dep `.lib`s + headers, ZTS |
 
 The glibc floor is 2.28 (built on AlmaLinux 8 with `gcc-toolset-13`), so a consumer binary linked against these runs on RHEL/Alma 8, Ubuntu 20.04+, Debian 10+, Amazon Linux 2023 and Fedora 40+.
@@ -32,6 +34,11 @@ NTS tarballs:
 - are **not** part of a `platform=all` build and do not gate release completeness — a failed NTS build never blocks a release,
 - carry `ffi` in addition to the shared extension set (see below),
 - are kept current only for the minors listed under `minors_nts` in `versions.json`.
+
+The `-gnu-nts-shared` variants are the same NTS builds packaged as a **shared
+embed**: `lib/libphp.so` with the dependency libraries linked in, for consumers
+that must `dlopen()` or link `-lphp` against a shared libphp (e.g. PAM). The
+static `libphp.a` variants stay the default for everything else.
 
 ### Experimental: Windows clang-cl / TAILCALL VM lane
 
@@ -105,7 +112,7 @@ THIRD-PARTY-NOTICES.txt
 Assets are named:
 
 ```
-php-sdk-{php_version}-{os}-{arch}[-gnu][-nts].tar.gz
+php-sdk-{php_version}-{os}-{arch}[-gnu][-nts[-shared]][-clang].tar.gz
 ```
 
 ### `bin/php-config`
