@@ -985,6 +985,12 @@ jobs:
     needs: setup
     if: needs.setup.outputs.build-windows == 'true'
     runs-on: [self-hosted, windows, x64]
+    # Stay just under ephemerd's 2 h job_timeout, same as build-windows-clang.
+    # Hitting the fleet-side timeout instead of this one destroys the runner
+    # mid-step, and a destroyed runner never uploads its logs — every failure
+    # then reports as "lost communication" with nothing to debug (confirmed:
+    # the GitHub logs API returns BlobNotFound for all 80 of these).
+    timeout-minutes: 119
     # Windows-specific extension set: PHP_EXTENSIONS minus the Unix-only
     # entries (pcntl, posix, sysvmsg, sysvsem, sysvshm) and any extension
     # that won't build under static-php-cli's current Windows toolchain:
@@ -1162,20 +1168,31 @@ jobs:
         # libunistring, ncurses) are in the Windows artifact set, which uses
         # gettext-win/libiconv-win from git. So no CUSTOM_URLS block here.
         #
-        # The 50-attempt budget was sized for the rc17 race (~2-5 attempts per
-        # large artifact, cleared on attempt 4 of 50 in 31281980458). rc18
-        # ships the upstream fix, after which this loop should be a formality
-        # -- but the rc18 Windows leg has not run yet (the Windows runner
-        # fleet was down when rc18 landed), so the budget stays at 50 until a
-        # green Windows run on rc18 proves the fix in practice. Then it can
-        # shrink to ~3. If a run burns many attempts on rc18+, the upstream
-        # fix has regressed: check the -vv output of the final attempt, which
-        # logs the curl exit code spc otherwise discards.
+        # timeout-minutes + max=3, matching build-windows-clang. The old
+        # 50-attempt budget was sized for the rc17 race, but on rc19 the
+        # failure mode is different and unbounded: inside the Windows job
+        # container the download STALLS at zero bytes (measured on the fleet
+        # 2026-09-09: the container vSwitch moved 250 bytes in 30 s while two
+        # jobs sat in this step). spc's curl carries --max-time 3600, so one
+        # stalled connection waits a full HOUR, x3 curl retries, x50 attempts
+        # -- the job can never finish, and ephemerd's 2 h job_timeout always
+        # fires first and destroys the runner before its logs upload.
+        #
+        # That is why this step has failed ~6-8x/day since 2026-08-27 with no
+        # diagnosable output. Failing fast is what makes it debuggable: the
+        # final attempt's -vv output is only useful if the runner survives to
+        # upload it.
+        #
+        # Not a bandwidth problem: the identical `spc download` of all 30
+        # artifacts completes in 71 s on the same node OUTSIDE the container,
+        # and that node pulls 40 MB/s. The stall is container-network-side and
+        # is being tracked fleet-side; this change bounds the damage either way.
         #
         # --retry 3 gives the artifact downloads curl-level retries (spc's
         # default is 0, single-shot).
+        timeout-minutes: 15
         run: |
-          $max = 50
+          $max = 3
           for ($i = 1; $i -le $max; $i++) {
             # Array + splat, not a backtick-continued line: appending a $null
             # arg to a native command in PowerShell 5.1 passes an empty string
