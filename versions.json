@@ -17,9 +17,10 @@
     "linux-x86_64-gnu-nts-shared",
     "linux-aarch64-gnu-nts-shared"
   ],
-  "_comment_experimental": "platforms_experimental are dispatched explicitly, never gate anything, and MUST NOT move into platforms_required. windows-x86_64-clang is the clang-cl/TAILCALL-VM Windows build: 1.7x faster VM dispatch than the MSVC lane with the pinned LLVM (22.1.8), but the VS-bundled clang 19 is SLOWER than MSVC - see build.yml build-windows-clang comments before touching the pin.",
+  "_comment_experimental": "platforms_experimental are dispatched explicitly (never as part of `all`, never gating a release) and MUST NOT move into platforms_required. windows-x86_64-clang is the clang-cl/TAILCALL-VM Windows build: 1.7x faster VM dispatch than the MSVC lane with the pinned LLVM (22.1.8), but the VS-bundled clang 19 is SLOWER than MSVC - see build.yml build-windows-clang comments before touching the pin. watch-php.yml keeps these current for the minors listed in minors_experimental (a separate reconciliation pass, mirroring minors_nts). minors_experimental MUST list only TAILCALL-capable minors (8.5+): 8.3/8.4 have no TAILCALL VM, so a clang build there is pointless and the VM-kind gate in build.yml would refuse to publish it.",
   "platforms_experimental": [
     "windows-x86_64-clang"
   ],
-  "minors_nts": ["8.4"]
+  "minors_nts": ["8.4"],
+  "minors_experimental": ["8.5"]
 }
