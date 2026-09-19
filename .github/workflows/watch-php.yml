@@ -248,3 +248,83 @@ jobs:
                 || echo "::warning::dispatching ${plat} for ${latest} failed -- next cycle retries"
             done
           done
+
+      # Experimental clang-cl / TAILCALL Windows SDK. Like NTS, this variant is
+      # NOT part of build.yml's platform=all and never gates a release, so the
+      # main loop never dispatches it -- yet ephpm's release TAILCALL leg
+      # downloads php-sdk-<ver>-windows-x86_64-clang.tar.gz and 404s without it
+      # (v0.11.0 shipped with no TAILCALL artifact because 8.5.7's clang SDK was
+      # never hand-dispatched). This pass keeps it current for the TAILCALL-
+      # capable minors (minors_experimental, 8.5+; 8.3/8.4 have no TAILCALL VM).
+      #
+      # Same failure policy as the NTS pass: nothing here is fatal. A missing
+      # clang tarball must never turn this watcher red or block an ephpm
+      # release -- the clang build is the fragile one, and it is non-gating on
+      # the SDK side (build.yml keeps it out of `all`) precisely so it can fail
+      # alone.
+      #
+      # Unlike the NTS pass there is NO php-sources mirror gate: build.yml's
+      # clang lane clones php-src straight from github.com/php/php-src (branch
+      # php-X.Y.Z), so it does not depend on the mirror the Linux legs use.
+      #
+      # The in-flight gate reuses build.yml's run-name ("Build PHP X.Y.Z"),
+      # which does not distinguish platforms -- so a still-running ZTS build of
+      # this version (freshly dispatched by the main step above for a brand-new
+      # patch) defers the clang dispatch by one 6h cycle. That is deliberate: it
+      # lets the v<ver> release exist (with the required ZTS tarballs) before
+      # the clang single-platform run attaches its asset, and it cannot produce
+      # a dispatch/cancel loop against build.yml's cancel-in-progress group.
+      - name: Reconcile experimental (clang / TAILCALL) builds
+        if: success() && hashFiles('active.json') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -u
+
+          minors=$(jq -r '.minors_experimental[]? // empty' versions.json 2>/dev/null || true)
+          plats=$(jq -r '.platforms_experimental[]? // empty' versions.json 2>/dev/null || true)
+          if [ -z "$minors" ] || [ -z "$plats" ]; then
+            echo "no minors_experimental / platforms_experimental configured -- nothing to do"
+            exit 0
+          fi
+
+          for minor in $minors; do
+            major="${minor%%.*}"
+            latest=$(jq -r --arg M "$major" --arg m "$minor" \
+              '.[$M][$m].version // empty' active.json)
+            if [ -z "$latest" ]; then
+              echo "::warning::minor ${minor} is in minors_experimental but not in php.net active.php -- skipping clang"
+              continue
+            fi
+
+            assets=$(gh api "repos/${GH_REPO}/releases/tags/v${latest}" \
+              --jq '.assets[].name' 2>/dev/null || true)
+            missing=""
+            for plat in $plats; do
+              echo "$assets" | grep -qxF "php-sdk-${latest}-${plat}.tar.gz" \
+                || missing="$missing $plat"
+            done
+            if [ -z "$missing" ]; then
+              echo "==> ${latest}: experimental tarballs present -- nothing to do"
+              continue
+            fi
+            echo "==> ${latest}: experimental missing:${missing}"
+
+            in_flight=$(gh run list --workflow=build.yml \
+              --json displayTitle,status \
+              --jq "[.[] | select(.displayTitle == \"Build PHP ${latest}\"
+                     and (.status == \"queued\" or .status == \"in_progress\"))] | length" \
+              2>/dev/null || echo 0)
+            if [ "${in_flight:-0}" -gt 0 ]; then
+              echo "    a build for ${latest} is queued/in_progress -- deferring clang a cycle"
+              continue
+            fi
+
+            for plat in $missing; do
+              echo "    dispatching build.yml platform=${plat} for ${latest}"
+              gh workflow run build.yml --ref main \
+                -f "php_version=${latest}" -f "platform=${plat}" \
+                || echo "::warning::dispatching ${plat} for ${latest} failed -- next cycle retries"
+            done
+          done
