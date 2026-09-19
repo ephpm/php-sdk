@@ -1166,7 +1166,46 @@ jobs:
         # Note this was never the GNU-mirror problem the Linux/macOS legs work
         # around: none of the mirrored tarballs (gettext, idn2, libiconv,
         # libunistring, ncurses) are in the Windows artifact set, which uses
-        # gettext-win/libiconv-win from git. So no CUSTOM_URLS block here.
+        # gettext-win/libiconv-win from git.
+        #
+        # It does, however, have its own git problem, which is what the
+        # CUSTOM_URLS block below fixes. spc's gettext-win artifact is
+        #
+        #   source: {type: git, url: winlibs/gettext.git, rev: '0.18'}
+        #
+        # an unshallowed 57 MB clone -- 5x its libiconv-win sibling. That clone
+        # stalls mid-packfile and never recovers, and spc's git invocation
+        # carries -c http.lowSpeedLimit=1 -c http.lowSpeedTime=3600, so a
+        # 1-byte/sec trickle is tolerated for a full HOUR rather than failing.
+        # The 15 min step budget above fires first, every time: this step has
+        # died at "[22/30] Downloading artifact gettext-win source from git"
+        # on every Windows build since ~2026-08-05 (last shipped Windows asset).
+        #
+        # It is NOT a block and NOT bandwidth. Measured on the fleet node
+        # 2026-09-18, from the host that runs these jobs:
+        #
+        #   git ref advertisement (info/refs)  HTTP 200 in 0.31s
+        #   winlibs/gettext tarball (29 MB)    4.2s @ 6.9 MB/s
+        #   libiconv-win tarball (5 MB)        1.2s @ 4.3 MB/s
+        #
+        # The identical content downloads over HTTP in four seconds while the
+        # clone hangs past four minutes. So fetch the tarball and hand it to
+        # spc, which is sound for a `type: git` artifact: --custom-url replaces
+        # the artifact's source callback outright with a plain Url download
+        # (ArtifactDownloader::applyCustomDownloads), so spc never needs a .git
+        # tree. The codeload tarball carries a single top-level gettext-0.18/
+        # dir, which spc's extractor strips ("Unzip file with stripping
+        # top-level directory", ArtifactExtractor), landing the same layout the
+        # clone produced -- verified to contain the libintl_a.lib the artifact
+        # declares under MSVC11/libintl_static/x64/Release/.
+        #
+        # Downloaded to a file rather than passing the codeload URL directly
+        # because spc names the archive basename($url), and the codeload path
+        # ends in "/0.18" -- extensionless, which breaks archive detection.
+        #
+        # libiconv-win is the same `type: git` shape and the same latent risk,
+        # but it is currently downloading fine, so it is deliberately left
+        # alone here rather than churning a working path.
         #
         # timeout-minutes + max=3, matching build-windows-clang. The old
         # 50-attempt budget was sized for the rc17 race, but on rc19 the
@@ -1192,6 +1231,25 @@ jobs:
         # default is 0, single-shot).
         timeout-minutes: 15
         run: |
+          # Mirror gettext-win over HTTP instead of letting spc clone it.
+          # Soft-fails: on a codeload hiccup we warn and let spc try the clone,
+          # which is no worse than today's unconditional behaviour.
+          $CustomUrls = @()
+          $depDir = Join-Path $env:RUNNER_TEMP 'deps'
+          New-Item -ItemType Directory -Force -Path $depDir | Out-Null
+          $gettextTgz = Join-Path $depDir 'gettext-win.tar.gz'
+          & "$env:SystemRoot\System32\curl.exe" -fsSL --retry 3 --retry-delay 5 --max-time 300 `
+            -o $gettextTgz 'https://codeload.github.com/winlibs/gettext/tar.gz/refs/heads/0.18'
+          if ($LASTEXITCODE -eq 0) {
+            # spc splits on the FIRST colon only (explode(':', $v, 2)), so the
+            # drive-letter colon in the file:// URL survives intact.
+            $gettextUrl = 'file:///' + ($gettextTgz -replace '\\', '/')
+            $CustomUrls += "--custom-url=gettext-win:$gettextUrl"
+            Write-Host "==> mirrored gettext-win as $gettextTgz"
+          } else {
+            Write-Host "::warning::gettext-win tarball mirror failed (curl exit $LASTEXITCODE); falling back to spc's git clone, which is the known 15-minute hang"
+          }
+
           $max = 3
           for ($i = 1; $i -le $max; $i++) {
             # Array + splat, not a backtick-continued line: appending a $null
@@ -1204,6 +1262,7 @@ jobs:
               '--retry=3',
               '--prefer-pre-built'
             )
+            $spcArgs += $CustomUrls
             if (-not [string]::IsNullOrEmpty($env:PHP_SRC_LOCAL)) {
               $spcArgs += @('--custom-local', "php-src:$env:PHP_SRC_LOCAL")
             }
