@@ -1545,9 +1545,15 @@ jobs:
     runs-on: [self-hosted, windows, x64]
     # Keep under ephemerd's job_timeout (2h at the time of writing): when THAT
     # fires first, the VM is destroyed mid-step and the job shows "runner lost
-    # communication" with no logs. A healthy run is ~1h40m (installs ~25m +
-    # download ~2m + clang build ~60m+); this bound makes an over-long run fail
+    # communication" with no logs. This bound makes an over-long run fail
     # visibly on the GitHub side with logs intact.
+    #
+    # The clang compile is parallelized with /MP (multi-process), injected into
+    # config.w32 by the patch step below. PHP only enables /MP under VS_TOOLSET,
+    # so forcing the clang toolset used to leave the batched compile
+    # single-process — it was cancelled at exactly ~2h in "Build php8embed".
+    # With /MP the compile scales with the runner's core count, the same way the
+    # MSVC lane already fits under 2h via PHP's default /MP auto.
     timeout-minutes: 119
     # Same extension set as the MSVC lane — the artifact must differ ONLY in
     # the compiler and VM kind.
@@ -1735,8 +1741,35 @@ jobs:
             "`t}"
           )
           $content = $content.Replace($anchor2, ($injectLines -join "`n"))
+
+          # 3. Re-enable multi-process compilation (/MP) for the clang toolset.
+          #    PHP gates /MP behind `if (VS_TOOLSET)` in config.w32. This lane
+          #    forces PHP_TOOLSET="clang" (patch 1), so VS_TOOLSET is false and
+          #    the /MP block is skipped: the batched clang-cl compile runs
+          #    single-process and blows the 2h job budget (root cause of the
+          #    "cancelled at ~2h during Build php8embed" timeout). The MSVC lane
+          #    fits precisely because it gets PHP's default `/MP auto` for free.
+          #    clang-cl honors /MP (LLVM >= 19; this lane pins 22.x), so mirror
+          #    the VS behaviour for the non-VS toolset. PHP itself disables /MP
+          #    for debug builds, so keep that carve-out. VS_TOOLSET is already
+          #    set (toolset_setup_compiler, above the anchor); CFLAGS is defined
+          #    by the anchor call itself.
+          $anchor3 = 'toolset_setup_common_cflags();'
+          if (-not $content.Contains($anchor3)) {
+            Write-Error "config.w32 common-cflags anchor not found - cannot enable /MP for the clang toolset, refusing to build (would compile serially and blow the CI timeout)"
+            exit 1
+          }
+          $mpInject = @(
+            $anchor3,
+            "if (!VS_TOOLSET && PHP_DEBUG != `"yes`") {",
+            "`tADD_FLAG(`"CFLAGS`", `" /MP `");",
+            "`tSTDOUT.WriteLine(`"Enabling multi process build (clang-cl, php-sdk lane)`");",
+            "}"
+          )
+          $content = $content.Replace($anchor3, ($mpInject -join "`n"))
+
           Set-Content -Path $cfg -Value $content -Encoding ascii
-          Write-Host "==> php-src patched for clang toolset + TAILCALL"
+          Write-Host "==> php-src patched for clang toolset + TAILCALL + /MP (multi-process compile)"
 
       - name: Download spc
         shell: powershell
