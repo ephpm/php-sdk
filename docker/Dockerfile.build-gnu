@@ -1,0 +1,76 @@
+# php-sdk gnu build image: almalinux:8 with the SDK toolchain pre-installed.
+#
+# WHY THIS EXISTS
+# build.yml ran `docker run almalinux:8 sh -c '... dnf install ...'` and
+# installed the toolchain from scratch on every single build. Measured on the
+# fleet 2026-09-20 (run 35508288415, ducks, x86_64 gnu):
+#
+#   docker run -> container running        ~25 s
+#   dnf install (toolchain)               ~162 s   <-- this
+#   dependency library builds              439 s
+#   PHP itself                              69 s
+#
+# 162 s of a 696 s build, every build, for a package set that never changes.
+#
+# And it is NOT a download problem, so a package mirror would not have helped:
+#
+#   Total download size: 213 M
+#   Downloading Packages ... done          ~6 s    (~37 MB/s)
+#   Running transaction                   ~156 s   <-- rpm extract + scriptlets
+#
+# Only ~6 s was transfer. The rest is unpacking 213 MB of RPMs into a fresh
+# container. The only way to stop paying it is to not do it per build.
+#
+# GLIBC FLOOR
+# almalinux:8 is glibc 2.28, which sets the floor for everything linked here.
+# That is deliberate and matches ephpm/ephpm-ci: a modern GCC over an old
+# glibc symbol floor, the manylinux model. Do NOT bump the base to a newer
+# distro without understanding that it raises the floor for shipped binaries.
+#
+# Why gcc-toolset-13 and NOT 14: GCC 14 makes implicit-function-declaration a
+# hard error. 13 keeps it a warning and matches the rest of the pipeline
+# (ephpm/ephpm-ci pins 13 for the same reason).
+#
+# Pinned to the multi-arch OCI-index digest, NOT a single-arch manifest digest,
+# so it resolves per-arch on both the x64 and arm64 runners and cannot drift
+# when almalinux:8 is republished. To refresh:
+#   docker buildx imagetools inspect docker.io/library/almalinux:8
+# and pin the top-level index "Digest:" (confirm its children list both
+# linux/amd64 and linux/arm64). Keep in sync with ephpm/ephpm's
+# docker/Dockerfile.gha, which pins the same base.
+ARG BASE_IMAGE=docker.io/library/almalinux:8@sha256:4a87d2615a770506e204c27d6248ac97f4df67f4e41e2e9c47c81f0ed0be98cb
+FROM ${BASE_IMAGE}
+
+# The package set is exactly what build.yml installed inline, so switching to
+# this image is a no-op for the build itself. If build.yml ever needs another
+# package, add it HERE and rebuild -- adding it back inline would silently
+# reintroduce the per-build cost this image exists to remove.
+#
+#   gcc-toolset-13  GCC 13 over glibc 2.28 (see above)
+#   autoconf/automake/libtool/bison/flex/make/cmake/pkgconfig
+#                   autotools + cmake, needed by spc's library build recipes
+#   re2c            PHP's lexer generator. Not in the base repos, so it comes
+#                   from EPEL; if it is ever unavailable the build falls back
+#                   to `spc doctor` building it, which is slower but works.
+#   bash/curl/git/tar/xz/which/ca-certificates
+#                   spc drives all of these directly
+RUN dnf install -y dnf-plugins-core epel-release \
+    && (dnf config-manager --set-enabled powertools 2>/dev/null \
+        || dnf config-manager --set-enabled crb 2>/dev/null || true) \
+    && dnf install -y --allowerasing \
+        bash ca-certificates curl git gcc-toolset-13 autoconf \
+        automake bison cmake flex libtool make pkgconfig \
+        tar xz which \
+    && (dnf install -y re2c || echo "re2c not packaged; spc doctor will build it") \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Bake the toolset onto PATH instead of sourcing /opt/rh/gcc-toolset-13/enable.
+# build.yml sourced it at the top of its script; an ENV is equivalent and
+# survives every RUN and the container entrypoint, so a `sh -c` step gets the
+# modern gcc without a manual source. Same approach as ephpm/ephpm-ci.
+ENV PATH=/opt/rh/gcc-toolset-13/root/usr/bin:$PATH \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64:/opt/rh/gcc-toolset-13/root/usr/lib \
+    PKG_CONFIG_PATH=/opt/rh/gcc-toolset-13/root/usr/lib64/pkgconfig:/usr/lib64/pkgconfig
+
+WORKDIR /src

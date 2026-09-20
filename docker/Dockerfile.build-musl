@@ -1,0 +1,30 @@
+# php-sdk musl build image: alpine:3.20 with the SDK toolchain pre-installed.
+#
+# The musl counterpart of Dockerfile.build-gnu. See that file for the
+# measurement that motivated pre-baking: on the gnu leg the inline toolchain
+# install cost ~162 s of a 696 s build, of which only ~6 s was download.
+#
+# apk is considerably faster than dnf, so the saving here is smaller than on
+# the gnu side -- but it is the same class of waste (reinstalling an unchanging
+# package set into a fresh container on every build), and keeping both legs on
+# pre-baked images means build.yml has ONE code path instead of an if/else that
+# installs packages inline for one libc and not the other.
+#
+# The alpine base is what makes this the musl leg: build.yml's comment is
+# "the container image decides the libc flavor". Nothing else in the build
+# selects musl, so changing this base changes the libc of everything produced.
+ARG BASE_IMAGE=docker.io/library/alpine:3.20
+FROM ${BASE_IMAGE}
+
+# Exactly the package set build.yml installed inline. build-base is alpine's
+# gcc/musl-dev/make bundle -- the musl equivalent of gcc-toolset-13 on the gnu
+# side, except alpine's system GCC is already modern so no toolset activation
+# is needed and there is no PATH/ENV block below.
+#
+# linux-headers is musl-specific: glibc distros ship kernel headers with the
+# libc package, alpine does not, and several of spc's library builds need them.
+RUN apk add --no-cache \
+        bash curl git build-base autoconf automake bison cmake flex \
+        libtool make pkgconf re2c linux-headers tar xz
+
+WORKDIR /src

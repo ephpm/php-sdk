@@ -180,24 +180,24 @@ jobs:
           # inside `all` would take the whole release down with it. NTS is
           # dispatched explicitly (or by watch-php.yml, which dispatches it
           # as its own platform run) and can fail on its own.
-          musl_x64='{"arch":"x86_64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","x64"]}'
-          musl_arm='{"arch":"aarch64","libc":"musl","image":"docker.io/library/alpine:3.20","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","arm64"]}'
-          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","x64"]}'
-          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","arm64"]}'
+          musl_x64='{"arch":"x86_64","libc":"musl","image":"ephpm/php-sdk-build:musl","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","x64"]}'
+          musl_arm='{"arch":"aarch64","libc":"musl","image":"ephpm/php-sdk-build:musl-arm64","suffix":"","zts":"1","extra":"","variant":"musl","runner":["self-hosted","linux","arm64"]}'
+          gnu_x64='{"arch":"x86_64","libc":"gnu","image":"ephpm/php-sdk-build:gnu","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","x64"]}'
+          gnu_arm='{"arch":"aarch64","libc":"gnu","image":"ephpm/php-sdk-build:gnu-arm64","suffix":"-gnu","zts":"1","extra":"","variant":"gnu","runner":["self-hosted","linux","arm64"]}'
           # NTS, glibc only. ffi rides along here rather than in the shared
           # PHP_EXTENSIONS because its --enable-zend-signals would override
           # the --disable-zend-signals spc emits for ZTS builds (see the
           # PHP_EXTENSIONS comment at the top of this file).
-          nts_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","x64"]}'
-          nts_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","arm64"]}'
+          nts_x64='{"arch":"x86_64","libc":"gnu","image":"ephpm/php-sdk-build:gnu","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","x64"]}'
+          nts_arm='{"arch":"aarch64","libc":"gnu","image":"ephpm/php-sdk-build:gnu-arm64","suffix":"-gnu-nts","zts":"0","extra":",ffi","variant":"gnu-nts","runner":["self-hosted","linux","arm64"]}'
           # Shared-embed NTS: same toolchain and extension set as -gnu-nts,
           # but SPC_CMD_VAR_PHP_EMBED_TYPE=shared (the "embed" field, read by
           # the container script) makes spc produce lib/libphp.so with all
           # dependencies statically linked inside, instead of lib/libphp.a
           # plus dependency archives. For consumers whose build systems only
           # detect a shared libphp (dlopen/-lphp), e.g. PAM.
-          nts_sh_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","x64"]}'
-          nts_sh_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","arm64"]}'
+          nts_sh_x64='{"arch":"x86_64","libc":"gnu","image":"ephpm/php-sdk-build:gnu","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","x64"]}'
+          nts_sh_arm='{"arch":"aarch64","libc":"gnu","image":"ephpm/php-sdk-build:gnu-arm64","suffix":"-gnu-nts-shared","zts":"0","extra":",ffi","variant":"gnu-nts-shared","embed":"shared","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
             all)                    lm="[$musl_x64,$musl_arm,$gnu_x64,$gnu_arm]"; mac=true;  win=true ;;
             linux-x86_64)           lm="[$musl_x64]"; mac=false; win=false ;;
@@ -282,32 +282,38 @@ jobs:
             "${{ matrix.image }}" sh -c '
               set -eux
 
-              if [ "$LIBC" = "gnu" ]; then
-                # almalinux:8 = glibc 2.28, a Docker-format image the fleet can
-                # run (the quay manylinux images are OCI indexes the fleet
-                # Docker refuses even with --platform). Use gcc-toolset-13, NOT
-                # 14: GCC 14 promotes -Wimplicit-function-declaration to a hard
-                # ERROR, and PHP ext/openssl on glibc 2.28 calls strlcpy (added
-                # to glibc only in 2.38) without an in-scope prototype -- PHP
-                # bundles its own strlcpy symbol so it LINKS, but GCC 14 fails
-                # at COMPILE. GCC 13 keeps it a warning, so it builds and links
-                # against PHP built-in strlcpy. re2c is EPEL/PowerTools on
-                # AlmaLinux 8 (not preinstalled); enable both, keep re2c
-                # non-fatal, and let spc doctor --auto-fix build it if absent.
-                dnf install -y dnf-plugins-core epel-release
-                dnf config-manager --set-enabled powertools 2>/dev/null \
-                  || dnf config-manager --set-enabled crb 2>/dev/null || true
-                dnf install -y --allowerasing \
-                  bash ca-certificates curl git gcc-toolset-13 autoconf \
-                  automake bison cmake flex libtool make pkgconfig \
-                  tar xz which
-                dnf install -y re2c || echo "re2c not packaged; spc doctor will build it"
-                . /opt/rh/gcc-toolset-13/enable
-              else
-                apk add --no-cache \
-                  bash curl git build-base autoconf automake bison cmake flex \
-                  libtool make pkgconf re2c linux-headers tar xz
-              fi
+              # TOOLCHAIN COMES FROM THE IMAGE -- nothing is installed here.
+              #
+              # This block used to dnf/apk the whole toolchain into a fresh
+              # container on every build. Measured on the fleet 2026-09-20
+              # (run 35508288415, ducks, x86_64 gnu) that cost 162 s of a 696 s
+              # build, and it was NOT a download problem: 213 MB came down in
+              # ~6 s at ~37 MB/s, and the other ~156 s was rpm extraction and
+              # scriptlets. A package mirror would have saved six seconds; only
+              # pre-baking removes the rest. See docker/Dockerfile.build-gnu.
+              #
+              # The reasoning that used to live here is preserved in the
+              # Dockerfiles, because that is where it is now actionable:
+              #   - almalinux:8 (glibc 2.28) is a Docker-format image the fleet
+              #     can run, unlike the quay manylinux OCI indexes
+              #   - gcc-toolset-13 NOT 14: GCC 14 promotes
+              #     -Wimplicit-function-declaration to a hard ERROR, and PHP
+              #     ext/openssl on glibc 2.28 calls strlcpy (glibc 2.38+)
+              #     without an in-scope prototype. PHP bundles its own strlcpy
+              #     so it LINKS, but GCC 14 fails at COMPILE.
+              #   - the toolset is on PATH via ENV in the image, so there is no
+              #     `. /opt/rh/gcc-toolset-13/enable` to source here
+              #   - re2c stays non-fatal; if the image lacks it, spc doctor
+              #     --auto-fix builds it
+              #
+              # Fail loudly if the image is somehow not the pre-baked one,
+              # rather than letting a missing compiler surface later as a
+              # confusing build error.
+              command -v gcc >/dev/null || {
+                echo "::error::no gcc in the build image -- expected a prebaked ephpm/php-sdk-build image (see docker/Dockerfile.build-*)"
+                exit 1
+              }
+              echo "==> toolchain from image: $(gcc --version | head -1)"
 
               # Use native gcc instead of zig-cc. Native gcc links against
               # the image libc: musl on Alpine, glibc 2.28 on almalinux:8.

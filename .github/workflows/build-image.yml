@@ -1,0 +1,94 @@
+name: Build Toolchain Images
+run-name: "Build php-sdk toolchain images"
+
+# Publishes the pre-baked build images that build.yml runs its compiles inside.
+#
+# WHY
+# build.yml used to `docker run almalinux:8 sh -c '... dnf install ...'` and
+# rebuild the toolchain from scratch on every build. Measured on the fleet
+# 2026-09-20 (run 35508288415, ducks, x86_64 gnu): 162 s of a 696 s build, of
+# which only ~6 s was download and ~156 s was unpacking 213 MB of RPMs. The
+# package set never changes, so it belongs in an image.
+#
+# PATTERN
+# Deliberately mirrors ephpm/ephpm's .github/workflows/ci-image.yml, which
+# already publishes ephpm/ephpm-ci from this same fleet:
+#   - each arch builds NATIVELY on a runner of that arch. No buildx, no
+#     cross-build, no --privileged.
+#   - DOCKER_BUILDKIT=0 so the build routes through ephemerd's fake-daemon
+#     /build endpoint rather than the buildkit-in-a-container path, which
+#     would need --privileged.
+#   - no multi-arch manifest is published; consumers pick the tag for their
+#     arch via the -arm64 suffix.
+#
+# WHY NOT REUSE ephpm/ephpm-ci
+# It is also almalinux:8 + gcc-toolset-13, but it lacks the autotools set this
+# SDK needs (autoconf, automake, bison, cmake, flex, libtool, re2c) and carries
+# Rust + cargo-nextest that this build never uses. Sharing it would mean
+# either bloating that image or reinstalling packages here anyway.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile.build-gnu"
+      - "docker/Dockerfile.build-musl"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch:
+
+env:
+  IMAGE_REPO: ephpm/php-sdk-build
+
+jobs:
+  build:
+    name: "Image (${{ matrix.libc }}, ${{ matrix.arch }})"
+    runs-on: [self-hosted, linux, "${{ matrix.arch }}"]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { libc: gnu,  arch: x64,   suffix: "",       dockerfile: docker/Dockerfile.build-gnu }
+          - { libc: gnu,  arch: arm64, suffix: "-arm64", dockerfile: docker/Dockerfile.build-gnu }
+          - { libc: musl, arch: x64,   suffix: "",       dockerfile: docker/Dockerfile.build-musl }
+          - { libc: musl, arch: arm64, suffix: "-arm64", dockerfile: docker/Dockerfile.build-musl }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set date tag
+        run: echo "DATE_TAG=$(date +%Y%m%d)" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Tags are "<libc><arch-suffix>", e.g. gnu, gnu-arm64, musl, musl-arm64.
+      # The dated tag is what makes a bad image recoverable: build.yml can be
+      # pinned to a known-good date while a regression is sorted out, instead
+      # of the only options being "latest, broken" and "revert the image".
+      - name: Build and push
+        env:
+          DOCKER_BUILDKIT: "0"
+        run: |
+          TAG_FLOAT="${{ env.IMAGE_REPO }}:${{ matrix.libc }}${{ matrix.suffix }}"
+          TAG_DATED="${{ env.IMAGE_REPO }}:${{ matrix.libc }}-${{ env.DATE_TAG }}${{ matrix.suffix }}"
+          docker build -t "$TAG_FLOAT" -t "$TAG_DATED" -f "${{ matrix.dockerfile }}" .
+          docker push "$TAG_FLOAT"
+          docker push "$TAG_DATED"
+          echo "pushed $TAG_FLOAT and $TAG_DATED"
+
+      # Proves the image can actually do the job before anything consumes it.
+      # A toolchain image that builds and pushes but is missing a tool would
+      # otherwise fail later, inside a real build, as a confusing compile
+      # error rather than an obvious missing-binary error here.
+      - name: Verify the toolchain is present and on PATH
+        run: |
+          docker run --rm "${{ env.IMAGE_REPO }}:${{ matrix.libc }}${{ matrix.suffix }}" sh -c '
+            set -e
+            for t in gcc make autoconf automake libtool bison flex cmake pkg-config tar xz git curl; do
+              command -v "$t" >/dev/null || { echo "MISSING: $t"; exit 1; }
+            done
+            command -v re2c >/dev/null || echo "note: re2c absent, spc doctor will build it"
+            echo "gcc: $(gcc --version | head -1)"
+            echo "all required tools present"
+          '
