@@ -54,7 +54,23 @@ on:
         default: ""
 
 env:
-  SPC_VERSION: "v3.0.0-pgo-rc19"
+  # rc20 (2026-09-21) adds GHREL_PROXY support: spc routes GitHub API requests
+  # through the proxy ephemerd advertises when its release cache is enabled, so
+  # artifacts resolved via `type: ghrel`/`ghtar` are served from the node
+  # instead of the WAN. Unset -- off-fleet, or with the proxy disabled --
+  # behaviour is byte-identical, so this is safe on GitHub-hosted runners too.
+  #
+  # It does NOT cover artifacts that hardcode github.com/.../releases/download/
+  # as `type: url` (llvm_tools, llvm_compiler_rt, openssl.yml,
+  # strawberry-perl.yml, vswhere.yml) -- spc builds those URLs itself and never
+  # asks the API, so they still cross the WAN.
+  #
+  # rc20 also makes gettext pre-buildable (its ncurses/libxml2 moved from
+  # suggests to depends; packPrebuilt refuses a tree that declares suggests).
+  # Nothing consumes that yet -- it needs published prebuilt artifacts -- but it
+  # is the unblock for the library that dominates the dependency phase: gettext
+  # is 85s of 336s here and barely improves with more cores.
+  SPC_VERSION: "v3.0.0-pgo-rc20"
   # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
   # rejects SAPI names it doesn't know, so embed-based runtimes get
   # opcache_get_status() === false even with opcache.enable=1. The spc fork
