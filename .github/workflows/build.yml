@@ -283,6 +283,25 @@ jobs:
               -e "SPC_EXTRA_BUILD_SAPI=--build-cli"
             )
           fi
+          # GHREL_PROXY below: ephemerd injects it into the JOB container when
+          # its GitHub-release cache is on, but it does NOT reach spc on its
+          # own. This build runs in a NESTED container, and docker passes no
+          # environment through -- only what is listed here. Without that line
+          # the cache is deployed, running, and never contacted.
+          #
+          # Not hypothetical: measured on the first build after the proxies
+          # went live (2026-09-21), the ghrel cache on the node held ZERO files
+          # and the build was 612s against a 591s baseline -- no effect at all,
+          # because every artifact still crossed the WAN.
+          #
+          # The ":-}" matters. Off-fleet, or with the proxy disabled, the
+          # variable is unset and this passes an empty string, which spc's
+          # resolver treats as "no proxy" and sends straight to GitHub. A bare
+          # unquoted "-e GHREL_PROXY" would inherit nothing instead -- the same
+          # bug in a quieter form.
+          #
+          # NOTE: comments cannot live inside the backslash-continued docker
+          # run below; a "#" there is a bash syntax error, not a comment.
           docker run --name "spc-build-${{ matrix.variant }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
@@ -294,6 +313,7 @@ jobs:
             -e ENABLE_ZTS="${{ matrix.zts }}" \
             -e EMBED_TYPE="${{ matrix.embed }}" \
             -e SPC_OPCACHE_EXTRA_SAPIS="${{ env.SPC_OPCACHE_EXTRA_SAPIS }}" \
+            -e GHREL_PROXY="${GHREL_PROXY:-}" \
             "${PRERELEASE_ENV[@]}" \
             "${{ matrix.image }}" sh -c '
               set -eux
