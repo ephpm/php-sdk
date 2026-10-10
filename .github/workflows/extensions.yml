@@ -45,7 +45,7 @@ on:
         required: true
         type: string
       platform:
-        description: "Which glibc platform(s) to build extensions for."
+        description: "Which platform(s) to build extensions for."
         required: false
         type: choice
         default: linux-x86_64-gnu
@@ -53,6 +53,7 @@ on:
           - all
           - linux-x86_64-gnu
           - linux-aarch64-gnu
+          - macos-aarch64
       extensions:
         description: "Comma-separated extensions to build (curated ZTS-clean set)"
         required: false
@@ -88,6 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       linux-matrix: ${{ steps.compute.outputs.linux-matrix }}
+      build-macos: ${{ steps.compute.outputs.build-macos }}
       spc-version: ${{ steps.compute.outputs.spc-version }}
       prerelease: ${{ steps.compute.outputs.prerelease }}
       xdebug-version: ${{ steps.compute.outputs.xdebug-version }}
@@ -138,12 +140,14 @@ jobs:
           gnu_x64='{"arch":"x86_64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","x64"]}'
           gnu_arm='{"arch":"aarch64","libc":"gnu","image":"docker.io/library/almalinux:8","suffix":"-gnu","runner":["self-hosted","linux","arm64"]}'
           case "$PLATFORM" in
-            all)                lm="[$gnu_x64,$gnu_arm]" ;;
-            linux-x86_64-gnu)   lm="[$gnu_x64]" ;;
-            linux-aarch64-gnu)  lm="[$gnu_arm]" ;;
+            all)                lm="[$gnu_x64,$gnu_arm]"; mac=true ;;
+            linux-x86_64-gnu)   lm="[$gnu_x64]";          mac=false ;;
+            linux-aarch64-gnu)  lm="[$gnu_arm]";          mac=false ;;
+            macos-aarch64)      lm="[]";                  mac=true ;;
             *) echo "::error::unknown platform $PLATFORM"; exit 1 ;;
           esac
           echo "linux-matrix=$lm" >> "$GITHUB_OUTPUT"
+          echo "build-macos=$mac" >> "$GITHUB_OUTPUT"
 
   build-extensions:
     name: Extensions (${{ matrix.arch }}, ${{ matrix.libc }})
@@ -528,16 +532,246 @@ jobs:
           name: ephpm-ext-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}
           path: ephpm-ext-${{ inputs.php_version }}-linux-${{ matrix.arch }}${{ matrix.suffix }}.tar.gz
 
+  # macOS arm64 catalog. Same toolchain as build.yml build-macos (spc
+  # micro-PHP binary, Homebrew deps via spc doctor, Homebrew LLVM because
+  # Apple clang crashes on the JIT), same pinned php-src and xdebug inputs as
+  # the Linux job. The ePHPm macOS binary exports the PHP symbols, and the
+  # bundles are linked with undefined PHP symbols resolved at dlopen time, so
+  # the TSRM check below runs against the undefined-symbol table: a bundle
+  # that had libphp.a linked into it would carry its own engine copy.
+  build-extensions-macos:
+    name: Extensions (aarch64, macos)
+    needs: setup
+    if: needs.setup.outputs.build-macos == 'true'
+    runs-on: [self-hosted, macos, arm64]
+    env:
+      PHP_VERSION: ${{ inputs.php_version }}
+      SPC_WITH_PHP: ${{ needs.setup.outputs.spc-version }}
+      PHP_SRC_URL: ${{ inputs.php_src_url }}
+      PRERELEASE: ${{ needs.setup.outputs.prerelease }}
+      XDEBUG_VERSION: ${{ needs.setup.outputs.xdebug-version }}
+      XDEBUG_SHA256: ${{ needs.setup.outputs.xdebug-sha256 }}
+      EXTENSIONS: ${{ inputs.extensions }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Clean up previous builds
+        run: rm -rf buildroot source downloads ext-out ./*.tar.gz
+
+      - name: Download spc
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL "https://github.com/luthermonson/static-php-cli/releases/download/${{ env.SPC_VERSION }}/spc-macos-aarch64.tar.gz" \
+            | tar xz -C "$HOME/bin"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+
+      - name: Install Homebrew + build deps via spc doctor
+        env:
+          NONINTERACTIVE: "1"
+        run: |
+          i=0
+          until spc doctor --auto-fix; do
+            i=$((i + 1))
+            if [ "$i" -ge 5 ]; then
+              echo "spc doctor failed after $i attempts" >&2
+              exit 1
+            fi
+            sleep $((RANDOM % 4 + 3))
+          done
+
+      - name: Install LLVM and prepend to PATH
+        run: |
+          brew install llvm
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Download sources
+        run: |
+          if [ -n "${PHP_SRC_URL}" ]; then
+            php_src_fetch_url="${PHP_SRC_URL}"
+          else
+            php_src_fetch_url="https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"
+          fi
+          j=0
+          until curl -fsSL -o /tmp/php-src-mirror.tar.gz "${php_src_fetch_url}"; do
+            j=$((j + 1))
+            if [ "$j" -ge 5 ]; then
+              echo "php-src fetch failed after $j attempts (${php_src_fetch_url})" >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+          CUSTOM_URLS="--custom-url=php-src:file:///tmp/php-src-mirror.tar.gz"
+          mkdir -p /tmp/deps
+          if curl -fsSL -o /tmp/deps/manifest.txt \
+              "https://github.com/ephpm/php-sdk/releases/download/php-sources/gnu-deps-manifest.txt"; then
+            while read -r dep_name dep_file; do
+              if [ -z "${dep_name}" ] || [ -z "${dep_file}" ]; then
+                continue
+              fi
+              if curl -fsSL -o "/tmp/deps/${dep_file}" \
+                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/${dep_file}"; then
+                CUSTOM_URLS="${CUSTOM_URLS} --custom-url=${dep_name}:file:///tmp/deps/${dep_file}"
+              fi
+            done < /tmp/deps/manifest.txt
+          fi
+
+          case ",${EXTENSIONS}," in
+            *,xdebug,*)
+              if [ -z "${XDEBUG_VERSION}" ]; then
+                echo "::error::no pinned xdebug version for PHP ${PHP_VERSION}"
+                exit 1
+              fi
+              curl -fsSL --retry 5 -o /tmp/xdebug-src.tar.gz \
+                "https://github.com/xdebug/xdebug/archive/refs/tags/${XDEBUG_VERSION}.tar.gz"
+              echo "${XDEBUG_SHA256}  /tmp/xdebug-src.tar.gz" | shasum -a 256 -c -
+              CUSTOM_URLS="${CUSTOM_URLS} --custom-url=ext-xdebug:file:///tmp/xdebug-src.tar.gz"
+              ;;
+          esac
+
+          i=0
+          # shellcheck disable=SC2086
+          until spc download \
+              --with-php=${SPC_WITH_PHP} \
+              --for-extensions=pcre,mbstring,session,openssl,hash,json,filter,${EXTENSIONS} \
+              ${CUSTOM_URLS} \
+              --prefer-pre-built; do
+            i=$((i + 1))
+            if [ "$i" -ge 8 ]; then
+              echo "spc download failed after $i attempts" >&2
+              exit 1
+            fi
+            sleep $((5 * i))
+          done
+
+      - name: Build shared extensions
+        run: |
+          # PHP < 8.4 uses K&R declarations removed in C23 (see build.yml).
+          php_minor=$(echo "${PHP_VERSION}" | cut -d. -f2)
+          if [ "$php_minor" -lt 4 ]; then
+            export CFLAGS="-std=gnu17"
+          fi
+          BUILD_SAPI_EXTRA=""
+          if [ "${PRERELEASE}" = "true" ]; then
+            export SPC_MICRO_PATCHES=
+            export SPC_CMD_PREFIX_PHP_CONFIGURE="./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
+            BUILD_SAPI_EXTRA="--build-cli"
+          fi
+          DL_XDEBUG=""
+          if [ -f /tmp/xdebug-src.tar.gz ]; then
+            DL_XDEBUG="--dl-custom-url=ext-xdebug:file:///tmp/xdebug-src.tar.gz"
+          fi
+          # shellcheck disable=SC2086
+          spc build pcre,mbstring,session,openssl,hash,json,filter \
+            --dl-with-php=${SPC_WITH_PHP} \
+            --dl-custom-url=php-src:file:///tmp/php-src-mirror.tar.gz \
+            ${DL_XDEBUG} \
+            ${BUILD_SAPI_EXTRA} \
+            --build-embed \
+            --enable-zts \
+            --no-strip \
+            --build-shared=${EXTENSIONS} || {
+              tail -n 100 log/spc.shell.log || true
+              exit 1
+            }
+
+      - name: Verify and write manifest
+        run: |
+          staged=$(sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' "$(find buildroot/include -name php_version.h -path '*main*' | head -n 1)")
+          if [ "$staged" != "${PHP_VERSION}" ]; then
+            echo "::error::extensions built against PHP $staged but asked for ${PHP_VERSION}"
+            exit 1
+          fi
+          PHP_API_NO=$(sed -n 's/^#define ZEND_MODULE_API_NO \([0-9]*\).*/\1/p' "$(find buildroot/include -name zend_modules.h | head -n 1)")
+
+          mkdir -p ext-out
+          for ext in $(echo "${EXTENSIONS}" | tr "," " "); do
+            so=$(find buildroot -name "${ext}.so" -type f | head -n 1)
+            if [ -z "$so" ]; then
+              echo "::warning::no .so produced for ${ext}"
+              continue
+            fi
+            cp -Lf "$so" ext-out/
+          done
+          ls ext-out/*.so >/dev/null 2>&1 || { echo "::error::no shared extension .so files were produced"; exit 1; }
+
+          for so in ext-out/*.so; do
+            file "$so"
+            if ! nm -gUj "$so" | grep -Eq "^_(get_module|zend_extension_entry)$"; then
+              echo "::error::$so exports neither get_module nor zend_extension_entry"
+              exit 1
+            fi
+            if ! nm -uj "$so" | grep -Eq "_globals_offset$|_globals_id$|^_ts_allocate_id$|^_tsrm_get_ls_cache$"; then
+              echo "::error::$so does not import TSRM accessors - NTS build or PHP linked into the bundle"
+              exit 1
+            fi
+            if nm -gUj "$so" | grep -Eq "^_(compiler_globals_offset|executor_globals_offset|zend_register_functions)$"; then
+              echo "::error::$so defines engine symbols - libphp was linked into the bundle"
+              exit 1
+            fi
+          done
+
+          cd ext-out
+          {
+            echo "{"
+            echo "  \"php_version\": \"${PHP_VERSION}\","
+            echo "  \"php_api_no\": \"${PHP_API_NO}\","
+            echo "  \"zts\": 1,"
+            echo "  \"os\": \"macos\","
+            echo "  \"arch\": \"aarch64\","
+            echo "  \"extensions\": ["
+            first=1
+            for so in *.so; do
+              name="${so%.so}"
+              ver=$(strings "$so" | grep -E "^${name} [0-9]" | head -n 1 | awk '{print $2}')
+              if [ "$name" = "xdebug" ]; then
+                strings "$so" | grep -qxF "${XDEBUG_VERSION}" || { echo "::error::xdebug.so lacks version ${XDEBUG_VERSION}"; exit 1; }
+                ver="${XDEBUG_VERSION}"
+              fi
+              [ -n "$ver" ] || ver="unknown"
+              zend_ext=false
+              if nm -gUj "$so" | grep -Eq "^_zend_extension_entry$"; then zend_ext=true; fi
+              sha=$(shasum -a 256 "$so" | cut -d" " -f1)
+              if [ "$first" -eq 0 ]; then echo "    ,"; fi
+              first=0
+              echo "    {"
+              echo "      \"name\": \"${name}\","
+              echo "      \"file\": \"${so}\","
+              echo "      \"version\": \"${ver}\","
+              echo "      \"php_api_no\": \"${PHP_API_NO}\","
+              echo "      \"zts\": 1,"
+              echo "      \"zend_extension\": ${zend_ext},"
+              echo "      \"sha256\": \"${sha}\""
+              echo "    }"
+            done
+            echo "  ]"
+            echo "}"
+          } > manifest.json
+          cat manifest.json
+          python3 -m json.tool manifest.json > /dev/null
+
+      - name: Package extension catalog
+        run: tar czf "ephpm-ext-${PHP_VERSION}-macos-aarch64.tar.gz" -C ext-out .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ephpm-ext-${{ inputs.php_version }}-macos-aarch64
+          path: ephpm-ext-${{ inputs.php_version }}-macos-aarch64.tar.gz
+
   release:
     name: Create extension release
-    needs: [setup, build-extensions]
+    needs: [setup, build-extensions, build-extensions-macos]
     # Only main publishes. A branch run would otherwise replace the
     # production ext-<ver> assets with .so files built from whatever pie
     # resolves today; branch runs are validated from their workflow artifacts.
+    # A failed macOS leg does not hold back the Linux catalog.
     if: |
       always()
       && github.ref == 'refs/heads/main'
       && needs.build-extensions.result != 'failure'
+      && (needs.build-extensions.result == 'success'
+          || needs.build-extensions-macos.result == 'success')
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: write
@@ -560,7 +794,7 @@ jobs:
           name: PHP ${{ inputs.php_version }} ZTS extensions
           prerelease: ${{ needs.setup.outputs.prerelease == 'true' }}
           body: |
-            Loadable ZTS glibc (gnu) shared extensions for ephpm PHP ${{ inputs.php_version }}.
+            Loadable ZTS shared extensions (Linux glibc, macOS arm64) for ephpm PHP ${{ inputs.php_version }}.
 
             **PHP version:** ${{ inputs.php_version }}
             **Requested extensions:** ${{ inputs.extensions }}
@@ -583,4 +817,5 @@ jobs:
             |------|----------|
             | `ephpm-ext-${{ inputs.php_version }}-linux-x86_64-gnu.tar.gz` | Linux x86_64 (glibc, ZTS) |
             | `ephpm-ext-${{ inputs.php_version }}-linux-aarch64-gnu.tar.gz` | Linux aarch64 (glibc, ZTS) |
+            | `ephpm-ext-${{ inputs.php_version }}-macos-aarch64.tar.gz` | macOS arm64 (ZTS) |
           files: artifacts/*.tar.gz
