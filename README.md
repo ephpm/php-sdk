@@ -19,6 +19,7 @@ Built with [static-php-cli](https://github.com/crazywhalecc/static-php-cli) — 
 | Linux x86_64 (glibc, **NTS**, shared embed) | `-linux-x86_64-gnu-nts-shared` | `lib/libphp.so` (dependencies linked in) + headers, non-thread-safe |
 | Linux aarch64 (glibc, **NTS**, shared embed) | `-linux-aarch64-gnu-nts-shared` | `lib/libphp.so` (dependencies linked in) + headers, non-thread-safe |
 | Windows x86_64 (**experimental**, clang-cl + TAILCALL VM) | `-windows-x86_64-clang` | `lib/php8embed.lib` + dep `.lib`s + headers, ZTS |
+| Windows x86_64 (**shared engine**, official build) | `-windows-x86_64-shared` | `bin/php8ts.dll` + `lib/php8ts.lib` + `lib/php8embed.lib` + headers + official `bin/ext/php_*.dll`, ZTS |
 
 The glibc floor is 2.28 (built on AlmaLinux 8 with `gcc-toolset-13`), so a consumer binary linked against these runs on RHEL/Alma 8, Ubuntu 20.04+, Debian 10+, Amazon Linux 2023 and Fedora 40+.
 
@@ -95,6 +96,58 @@ change PHP upstream does not test on macOS. Until then: **use macOS PHP 8.5 for
 CPU-bound workloads.** The build logs the selected VM kind (macOS "Record Zend
 VM kind" step) and warns when a pre-8.5 macOS SDK lands on CALL.
 
+### Windows shared-engine SDK (`-windows-x86_64-shared`)
+
+The default Windows SDK links PHP statically, and a static PHP cannot load
+extension DLLs: `php_xdebug.dll` and every other PHP extension import the
+engine from `php8ts.dll`, which a static build does not have. The `-shared`
+tarball is the alternative for consumers that need to load extensions (Xdebug
+first of all).
+
+It is **not compiled here**. `.github/workflows/windows-shared.yml` runs
+`tools/windows-shared/package.ps1`, which repackages the official
+windows.php.net ZTS x64 build of the same release (the zip already contains a
+small static `php8embed.lib` whose objects import the engine through
+`php8ts.lib`; the matching devel pack carries `php8ts.lib` and the headers).
+Using the official engine means the official extension DLLs and xdebug.org's
+Xdebug DLLs are ABI-matched to it by construction. Every download is
+sha256-verified against `tools/windows-shared/checksums.txt` or the live
+windows.php.net checksum list, and the lane refuses to package unless a smoke
+test — the official `php.exe` run from a directory holding only the packaged
+`bin/` payload — loads every extension of the static SDK's set plus Xdebug.
+
+```
+include/php/             headers (devel pack)
+lib/php8embed.lib        embed SAPI, static, imports the engine
+lib/php8ts.lib           import library for php8ts.dll
+bin/php8ts.dll           the engine: ship it next to the consuming .exe
+bin/*.dll                engine + extension dependency DLLs (OpenSSL, ICU, ...)
+bin/ext/php_*.dll        official shared extensions
+ephpm-sdk.json           php_version, php_api_no, zts, crt, and `preload`
+LICENSE-PHP.txt, readme-redist-bins.txt, sbom/
+```
+
+Extensions the static SDK compiles in but the official build ships as DLLs
+(`mbstring`, `openssl`, `curl`, `intl`, `pdo_mysql`, ... and `opcache` on 8.3
+and 8.4) are listed, in a dependency-safe load order, under `preload` in
+`ephpm-sdk.json`; a consumer loads them at startup to get the same extension
+set as the static SDK. The VS toolset is the one windows.php.net uses for the
+minor (`vs16` for 8.3, `vs17` for 8.4+), recorded as `crt`.
+
+The same run publishes `ephpm-ext-<ver>-windows-x86_64.tar.gz` to the
+`ext-<ver>` release: `php_xdebug.dll` plus a `manifest.json` in the Linux
+catalog's schema (with `"libc": "msvc"`, `"os": "windows"`).
+
+```bash
+gh workflow run windows-shared.yml -f php_version=8.5.7
+```
+
+Older releases move to windows.php.net's `archives/`, which publishes no
+checksum list — pin their hashes in `checksums.txt` (the script prints the
+hash to pin when one is missing). A new Xdebug version needs its three
+`php_xdebug-<ver>-<minor>-ts-<vs>-x86_64.dll` hashes from xdebug.org added
+there too.
+
 ## Tarball layout
 
 ```
@@ -112,7 +165,7 @@ THIRD-PARTY-NOTICES.txt
 Assets are named:
 
 ```
-php-sdk-{php_version}-{os}-{arch}[-gnu][-nts[-shared]][-clang].tar.gz
+php-sdk-{php_version}-{os}-{arch}[-gnu][-nts[-shared]][-clang|-shared].tar.gz
 ```
 
 ### `bin/php-config`
@@ -148,7 +201,7 @@ Windows drops the Unix-only entries (`pcntl`, `posix`, `sysv*`), plus `gmp`, `pg
 
 `ffi` is not in the shared extension set on purpose. static-php-cli's `ext-ffi` passes `--enable-zend-signals`, and extension arguments land after the target arguments on the configure line, so it would override the `--disable-zend-signals` that spc emits for ZTS builds — silently changing signal behavior in the SDK ePHPm links. NTS builds emit no `--disable-zend-signals`, so `ffi` rides along there.
 
-Loadable **shared** ZTS extensions (`igbinary`, `msgpack`, `apcu`, `redis`, `mongodb`) are a separate artifact built by `.github/workflows/extensions.yml` and published under `ext-<version>` tags. That catalog is ZTS-only by design: Debian and Sury publish no ZTS builds, which is the gap it fills. There is no NTS catalog.
+Loadable **shared** ZTS extensions (`igbinary`, `msgpack`, `apcu`, `redis`, `mongodb`) are a separate artifact built by `.github/workflows/extensions.yml` and published under `ext-<version>` tags. That catalog is ZTS-only by design: Debian and Sury publish no ZTS builds, which is the gap it fills. There is no NTS catalog. Windows has a catalog entry for Xdebug only (`ephpm-ext-<ver>-windows-x86_64.tar.gz`, from `windows-shared.yml`); it loads only into a binary linked against the `-windows-x86_64-shared` SDK.
 
 ## Building
 
@@ -242,3 +295,5 @@ then builds with `PHP_SDK_PATH=php-sdk cargo build --release`.
 The MIT license in this repository covers the workflows and scripts here. It does **not** cover the contents of the published tarballs: those are an aggregate of PHP (PHP License 3.01 / Zend Engine License 2.00) and roughly twenty upstream libraries, each under its own terms — including a bundled `libstdc++.a` carrying the GCC Runtime Library Exception.
 
 Every tarball ships a `THIRD-PARTY-NOTICES.txt` listing the components, their SPDX identifiers, and where to get the full license texts. Read it before redistributing anything built from this SDK.
+
+The `-windows-x86_64-shared` tarball is the exception: it is the official windows.php.net binary distribution repackaged unmodified, so it carries that distribution's own notices instead — `LICENSE-PHP.txt` (PHP's `license.txt`), `readme-redist-bins.txt` (the bundled third-party DLLs and their licenses) and the upstream SBOM under `sbom/`. Xdebug (`ephpm-ext-<ver>-windows-x86_64.tar.gz`) is under the Xdebug License.

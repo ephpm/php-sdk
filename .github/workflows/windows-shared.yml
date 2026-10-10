@@ -1,0 +1,135 @@
+name: Windows shared SDK + extension catalog
+run-name: "Windows shared SDK for PHP ${{ inputs.php_version || 'pinned set (PR check)' }}"
+
+# Packages the Windows *shared* PHP SDK (php8ts.dll + php8ts.lib +
+# php8embed.lib + headers + the official extension DLLs) and the Windows Xdebug
+# catalog entry for one PHP release. See tools/windows-shared/package.ps1 for
+# the full rationale; the short version:
+#
+# The default Windows SDK (build.yml, platform windows-x86_64) is a static spc
+# --build-embed, and a binary that links PHP statically has no php8ts.dll for
+# extension DLLs to import the engine from, so it cannot load php_xdebug.dll
+# or any other PHP extension. This lane repackages the official
+# windows.php.net ZTS build of the same release instead of compiling PHP, so
+# the official extension DLLs and xdebug.org's Xdebug DLLs are ABI-matched to
+# the engine by construction.
+#
+# Separate workflow on purpose: build.yml's Windows legs and extensions.yml's
+# Linux catalog stay untouched. Nothing here is compiled, so it runs on
+# GitHub-hosted windows-latest rather than the self-hosted ephemerd fleet.
+#
+# Publishing (workflow_dispatch from main only) ADDS assets to existing
+# releases with `gh release upload --clobber`, which never edits a release's
+# title or body:
+#   v<ver>    php-sdk-<ver>-windows-x86_64-shared.tar.gz
+#   ext-<ver> ephpm-ext-<ver>-windows-x86_64.tar.gz
+# A missing release is created as a plain release with a short note.
+#
+# A pull request touching this lane builds and smoke-tests the pinned set
+# below without publishing anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_version:
+        description: "PHP version (GA x.y.z, e.g. 8.5.7). Must be a windows.php.net release."
+        required: true
+        type: string
+      xdebug_version:
+        description: "Xdebug release (xdebug.org Windows DLL; its sha256 must be in tools/windows-shared/checksums.txt)"
+        required: false
+        type: string
+        default: "3.5.3"
+  pull_request:
+    paths:
+      - ".github/workflows/windows-shared.yml"
+      - "tools/windows-shared/**"
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        env:
+          PHP_VERSION: ${{ inputs.php_version }}
+          XDEBUG_VERSION: ${{ inputs.xdebug_version }}
+        run: |
+          if [ -n "$PHP_VERSION" ]; then
+            echo "matrix=[{\"php\":\"$PHP_VERSION\",\"xdebug\":\"${XDEBUG_VERSION:-3.5.3}\"}]" >> "$GITHUB_OUTPUT"
+          else
+            # PR check: the versions ephpm's xtask pins today (pinned
+            # checksums path) - keep in step with checksums.txt.
+            echo 'matrix=[{"php":"8.3.33","xdebug":"3.5.3"},{"php":"8.4.23","xdebug":"3.5.3"},{"php":"8.5.7","xdebug":"3.5.3"}]' >> "$GITHUB_OUTPUT"
+          fi
+
+  package:
+    name: Package (PHP ${{ matrix.php }})
+    needs: setup
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package shared SDK + Xdebug catalog
+        shell: pwsh
+        run: |
+          ./tools/windows-shared/package.ps1 `
+            -PhpVersion '${{ matrix.php }}' `
+            -XdebugVersion '${{ matrix.xdebug }}' `
+            -OutDir "$env:RUNNER_TEMP/out" `
+            -WorkDir "$env:RUNNER_TEMP/work"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shared-${{ matrix.php }}
+          path: ${{ runner.temp }}/out/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: package
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach to v<ver> and ext-<ver>
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PHP_VERSION: ${{ inputs.php_version }}
+        run: |
+          set -eu
+          ls -lh artifacts/
+          sdk="artifacts/php-sdk-${PHP_VERSION}-windows-x86_64-shared.tar.gz"
+          ext="artifacts/ephpm-ext-${PHP_VERSION}-windows-x86_64.tar.gz"
+          test -f "$sdk" && test -f "$ext"
+
+          ensure_release() {
+            if ! gh release view "$1" > /dev/null 2>&1; then
+              gh release create "$1" --title "$2" --notes "$3"
+            fi
+          }
+          ensure_release "v${PHP_VERSION}" "PHP ${PHP_VERSION}" \
+            "PHP ${PHP_VERSION} SDK. Windows shared-engine SDK attached by windows-shared.yml."
+          ensure_release "ext-${PHP_VERSION}" "PHP ${PHP_VERSION} ZTS extensions" \
+            "PHP ${PHP_VERSION} ZTS extensions. Windows Xdebug attached by windows-shared.yml."
+
+          gh release upload "v${PHP_VERSION}" "$sdk" --clobber
+          gh release upload "ext-${PHP_VERSION}" "$ext" --clobber
