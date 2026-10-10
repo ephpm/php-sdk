@@ -370,7 +370,11 @@ jobs:
                 --build-embed \
                 --enable-zts \
                 --no-strip \
-                --build-shared=${EXTENSIONS}
+                --build-shared=${EXTENSIONS} || {
+                  echo "==> spc build failed; tail of /build/log/spc.shell.log:" >&2
+                  tail -n 100 /build/log/spc.shell.log >&2 || true
+                  exit 1
+                }
 
               # Version guard: the PHP we built the extensions against must be
               # the requested version. spc has silently fallen back to latest
