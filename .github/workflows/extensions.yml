@@ -697,15 +697,17 @@ jobs:
 
           for so in ext-out/*.so; do
             file "$so"
-            if ! nm -gUj "$so" | grep -Eq "^_(get_module|zend_extension_entry)$"; then
+            defined=$(nm -gUj "$so")
+            undefined=$(nm -uj "$so")
+            if ! grep -Eq "^_(get_module|zend_extension_entry)$" <<< "$defined"; then
               echo "::error::$so exports neither get_module nor zend_extension_entry"
               exit 1
             fi
-            if ! nm -uj "$so" | grep -Eq "_globals_offset$|_globals_id$|^_ts_allocate_id$|^_tsrm_get_ls_cache$"; then
+            if ! grep -Eq "_globals_offset$|_globals_id$|^_ts_allocate_id$|^_tsrm_get_ls_cache$" <<< "$undefined"; then
               echo "::error::$so does not import TSRM accessors - NTS build or PHP linked into the bundle"
               exit 1
             fi
-            if nm -gUj "$so" | grep -Eq "^_(compiler_globals_offset|executor_globals_offset|zend_register_functions)$"; then
+            if grep -Eq "^_(compiler_globals_offset|executor_globals_offset|zend_register_functions)$" <<< "$defined"; then
               echo "::error::$so defines engine symbols - libphp was linked into the bundle"
               exit 1
             fi
@@ -730,7 +732,7 @@ jobs:
               fi
               [ -n "$ver" ] || ver="unknown"
               zend_ext=false
-              if nm -gUj "$so" | grep -Eq "^_zend_extension_entry$"; then zend_ext=true; fi
+              if nm -gUj "$so" | grep -Ec "^_zend_extension_entry$" > /dev/null; then zend_ext=true; fi
               sha=$(shasum -a 256 "$so" | cut -d" " -f1)
               if [ "$first" -eq 0 ]; then echo "    ,"; fi
               first=0
