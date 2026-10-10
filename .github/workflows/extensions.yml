@@ -57,10 +57,27 @@ on:
         description: "Comma-separated extensions to build (curated ZTS-clean set)"
         required: false
         type: string
-        default: "igbinary,msgpack,apcu,redis,mongodb"
+        default: "igbinary,msgpack,apcu,redis,mongodb,xdebug"
+      php_src_url:
+        description: "Override URL for the php-src tarball. REQUIRED for a
+          PRE-RELEASE (beta/RC), same contract as build.yml php_src_url.
+          e.g. https://downloads.php.net/~svpernova09/php-8.6.0beta1.tar.gz .
+          Leave empty for GA builds (php-src comes from the php-sources mirror)."
+        required: false
+        type: string
+        default: ""
 
 env:
   SPC_VERSION: "v3.0.0-pgo-rc19"
+  # Xdebug is pinned per PHP minor instead of letting spc resolve it: the
+  # ext-xdebug pie source takes the newest Packagist release, which is a
+  # pre-release (3.6.0alpha1) as soon as one is tagged. 3.5.x configure
+  # rejects PHP >= 8.6, so 8.6 builds use the 3.6 pre-release. Source is
+  # the GitHub tag archive, sha256-verified, handed to spc via --custom-url.
+  XDEBUG_STABLE: "3.5.3"
+  XDEBUG_STABLE_SHA256: "954e56021668121ecc50b92d2ad1ce945f22ecf81ffc5bb5835219485b12ef5f"
+  XDEBUG_NEXT: "3.6.0alpha1"
+  XDEBUG_NEXT_SHA256: "e4f1ad4de249cb1f64173bbace2ae6d5974537053830a6b16e0f1f19c6fa2f3c"
 
 jobs:
   # Resolve the platform input into a Linux matrix, mirroring build.yml.setup.
@@ -71,11 +88,48 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       linux-matrix: ${{ steps.compute.outputs.linux-matrix }}
+      spc-version: ${{ steps.compute.outputs.spc-version }}
+      prerelease: ${{ steps.compute.outputs.prerelease }}
+      xdebug-version: ${{ steps.compute.outputs.xdebug-version }}
+      xdebug-sha256: ${{ steps.compute.outputs.xdebug-sha256 }}
     steps:
       - id: compute
         env:
           PLATFORM: ${{ inputs.platform }}
+          PHP_VERSION: ${{ inputs.php_version }}
+          PHP_SRC_URL: ${{ inputs.php_src_url }}
         run: |
+          # Same version classification as build.yml setup: spc --with-php
+          # only accepts x.y or x.y.z, so a pre-release passes major.minor
+          # and must bring its own php-src via php_src_url.
+          if printf '%s' "$PHP_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "spc-version=$PHP_VERSION" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            mm=$(printf '%s' "$PHP_VERSION" | grep -oE '^[0-9]+\.[0-9]+')
+            if [ -z "$mm" ]; then
+              echo "::error::php_version '$PHP_VERSION' has no numeric major.minor prefix"
+              exit 1
+            fi
+            if [ -z "$PHP_SRC_URL" ]; then
+              echo "::error::php_version '$PHP_VERSION' is a pre-release but php_src_url is empty"
+              exit 1
+            fi
+            echo "spc-version=$mm" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+          case "$PHP_VERSION" in
+            8.3.*|8.4.*|8.5.*)
+              echo "xdebug-version=${{ env.XDEBUG_STABLE }}" >> "$GITHUB_OUTPUT"
+              echo "xdebug-sha256=${{ env.XDEBUG_STABLE_SHA256 }}" >> "$GITHUB_OUTPUT" ;;
+            8.6.*)
+              echo "xdebug-version=${{ env.XDEBUG_NEXT }}" >> "$GITHUB_OUTPUT"
+              echo "xdebug-sha256=${{ env.XDEBUG_NEXT_SHA256 }}" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "xdebug-version=" >> "$GITHUB_OUTPUT"
+              echo "xdebug-sha256=" >> "$GITHUB_OUTPUT" ;;
+          esac
+
           # Build the ZTS shared-extension catalog on the SAME almalinux:8
           # base (glibc 2.28, gcc-toolset-13) as build.yml's gnu SDK jobs, so
           # the .so files match the SDK's glibc 2.28 floor. A catalog compiled
@@ -113,13 +167,30 @@ jobs:
         # .so files in addition to the embed PHP. Everything else (SPC_TARGET,
         # /tmp/spcbin, file:// php-src) is copied verbatim to preserve the
         # fleet fixes those lines encode.
+        # Pre-release (8.6) spc workarounds are the same as build.yml
+        # PRERELEASE_ENV (PRs #56/#57/#59): empty SPC_MICRO_PATCHES, and
+        # --enable-pic in place of the removed --with-pic. The build.yml
+        # --build-cli workaround is passed as SPC_EXTRA_BUILD_SAPI.
         run: |
+          PRERELEASE_ENV=()
+          if [ "${{ needs.setup.outputs.prerelease }}" = "true" ]; then
+            PRERELEASE_ENV=(
+              -e "SPC_MICRO_PATCHES="
+              -e "SPC_CMD_PREFIX_PHP_CONFIGURE=./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-rtld-now --enable-re2c-cgoto --disable-rpath --enable-pic"
+              -e "SPC_EXTRA_BUILD_SAPI=--build-cli"
+            )
+          fi
           docker run --name "spc-ext-${{ matrix.libc }}" \
             -e GITHUB_TOKEN="${GITHUB_TOKEN}" \
             -e SPC_VERSION="${{ env.SPC_VERSION }}" \
             -e PHP_VERSION="${{ inputs.php_version }}" \
+            -e SPC_WITH_PHP="${{ needs.setup.outputs.spc-version }}" \
+            -e PHP_SRC_URL="${{ inputs.php_src_url }}" \
+            -e XDEBUG_VERSION="${{ needs.setup.outputs.xdebug-version }}" \
+            -e XDEBUG_SHA256="${{ needs.setup.outputs.xdebug-sha256 }}" \
             -e EXTENSIONS="${{ inputs.extensions }}" \
             -e LIBC="${{ matrix.libc }}" \
+            "${PRERELEASE_ENV[@]}" \
             "${{ matrix.image }}" sh -c '
               set -eux
 
@@ -164,16 +235,49 @@ jobs:
               # builds deterministic. Pre-fetch with plain curl and hand spc a
               # file:// URL (spc internal HTTP client fails on the release-asset
               # redirect from the runner). Refresh the mirror when bumping PHP.
+              # A pre-release (PHP_SRC_URL set) fetches the beta/RC tarball
+              # from that URL instead; the mirror is GA-only.
+              if [ -n "${PHP_SRC_URL:-}" ]; then
+                php_src_fetch_url="${PHP_SRC_URL}"
+              else
+                php_src_fetch_url="https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"
+              fi
               j=0
-              until curl -fsSL -o /tmp/php-src-mirror.tar.gz \
-                  "https://github.com/ephpm/php-sdk/releases/download/php-sources/php-${PHP_VERSION}.tar.gz"; do
+              until curl -fsSL -o /tmp/php-src-mirror.tar.gz "${php_src_fetch_url}"; do
                 j=$((j + 1))
                 if [ "$j" -ge 5 ]; then
-                  echo "mirror fetch failed after $j attempts" >&2
+                  echo "php-src fetch failed after $j attempts (${php_src_fetch_url})" >&2
                   exit 1
                 fi
                 sleep 3
               done
+
+              # Pinned xdebug source (see XDEBUG_* in the workflow env). Passed
+              # to both spc download and spc build so neither phase resolves
+              # ext-xdebug through pie, which would pick the newest Packagist
+              # release.
+              XDEBUG_URLS=""
+              case ",${EXTENSIONS}," in
+                *,xdebug,*)
+                  if [ -z "${XDEBUG_VERSION:-}" ]; then
+                    echo "::error::no pinned xdebug version for PHP ${PHP_VERSION}" >&2
+                    exit 1
+                  fi
+                  j=0
+                  until curl -fsSL -o /tmp/xdebug-src.tar.gz \
+                      "https://github.com/xdebug/xdebug/archive/refs/tags/${XDEBUG_VERSION}.tar.gz"; do
+                    j=$((j + 1))
+                    if [ "$j" -ge 5 ]; then
+                      echo "xdebug ${XDEBUG_VERSION} fetch failed after $j attempts" >&2
+                      exit 1
+                    fi
+                    sleep 3
+                  done
+                  echo "${XDEBUG_SHA256}  /tmp/xdebug-src.tar.gz" | sha256sum -c -
+                  XDEBUG_URLS="--custom-url=ext-xdebug:file:///tmp/xdebug-src.tar.gz"
+                  echo "==> xdebug pinned to ${XDEBUG_VERSION}"
+                  ;;
+              esac
 
               # Download php-src plus the source for every extension we build:
               # the minimal static base compiled into the embed PHP AND the
@@ -209,10 +313,11 @@ jobs:
 
               i=0
               until spc download \
-                  --with-php=${PHP_VERSION} \
+                  --with-php=${SPC_WITH_PHP} \
                   --for-extensions=${ALL_EXTENSIONS} \
                   --custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
                   ${CUSTOM_URLS} \
+                  ${XDEBUG_URLS} \
                   --prefer-pre-built; do
                 i=$((i + 1))
                 if [ "$i" -ge 8 ]; then
@@ -248,9 +353,20 @@ jobs:
               # carries the actual loadable catalog. Confirmed locally: with
               # igbinary in both slots the shared igbinary.so lands in
               # buildroot/modules and passes the ZTS nm check.
+              # --dl-custom-url keeps the build phase on the same php-src and
+              # xdebug tarballs the download phase used (build.yml does the
+              # same for php-src; without it a pre-release re-resolves php-src
+              # through the GA-only php.net resolver).
               BASE_EXTENSIONS="pcre,mbstring,session,openssl,hash,json,filter"
+              XDEBUG_DL_URLS=""
+              if [ -n "${XDEBUG_URLS}" ]; then
+                XDEBUG_DL_URLS="--dl-custom-url=ext-xdebug:file:///tmp/xdebug-src.tar.gz"
+              fi
               spc build ${BASE_EXTENSIONS} \
-                --dl-with-php=${PHP_VERSION} \
+                --dl-with-php=${SPC_WITH_PHP} \
+                --dl-custom-url="php-src:file:///tmp/php-src-mirror.tar.gz" \
+                ${XDEBUG_DL_URLS} \
+                ${SPC_EXTRA_BUILD_SAPI:-} \
                 --build-embed \
                 --enable-zts \
                 --no-strip \
@@ -308,10 +424,18 @@ jobs:
               #     (PHP 8.5.7): U basic_globals_id, U compiler_globals_offset,
               #     U executor_globals_offset, U ts_allocate_id,
               #     U tsrm_get_ls_cache.
+              # A Zend extension (xdebug) is loaded via zend_extension= and is
+              # found through its exported zend_extension_entry; the manifest
+              # records which loader directive each .so needs.
               for so in /output/ext/*.so; do
                 echo "==> nm sanity for $so"
-                if ! nm -D "$so" 2>/dev/null | grep -q "get_module"; then
-                  echo "::error::$so does not export get_module - not a loadable PHP module" >&2
+                if ! nm -D --defined-only "$so" 2>/dev/null | grep -Eqw "get_module|zend_extension_entry"; then
+                  echo "::error::$so exports neither get_module nor zend_extension_entry - not a loadable PHP module" >&2
+                  exit 1
+                fi
+                if [ "$(basename "$so")" = "xdebug.so" ] \
+                    && ! nm -D --defined-only "$so" 2>/dev/null | grep -qw "zend_extension_entry"; then
+                  echo "::error::$so does not export zend_extension_entry" >&2
                   exit 1
                 fi
                 if nm -D "$so" 2>/dev/null | grep -Eq "_globals_offset|_globals_id|ts_allocate_id|tsrm_get_ls_cache"; then
@@ -324,7 +448,10 @@ jobs:
 
               # Build manifest.json: one entry per staged .so with name,
               # extension version (from its .so via php ext version string if
-              # present, else unknown), php_api_no, zts=1, sha256.
+              # present, else unknown), php_api_no, zts=1, zend_extension,
+              # sha256. xdebug has no "<name> <ver>" string to scrape; its
+              # version is the pinned one, checked against the literal
+              # XDEBUG_VERSION string compiled into the .so.
               cd /output/ext
               {
                 echo "{"
@@ -338,7 +465,18 @@ jobs:
                 for so in *.so; do
                   name="${so%.so}"
                   ver=$(strings "$so" 2>/dev/null | grep -E "^${name} [0-9]" | head -n 1 | awk "{print \$2}")
+                  if [ "$name" = "xdebug" ]; then
+                    if ! strings "$so" | grep -qxF "${XDEBUG_VERSION}"; then
+                      echo "::error::xdebug.so does not carry version string ${XDEBUG_VERSION}" >&2
+                      exit 1
+                    fi
+                    ver="${XDEBUG_VERSION}"
+                  fi
                   if [ -z "$ver" ]; then ver="unknown"; fi
+                  zend_ext=false
+                  if nm -D --defined-only "$so" 2>/dev/null | grep -qw "zend_extension_entry"; then
+                    zend_ext=true
+                  fi
                   sha=$(sha256sum "$so" | cut -d" " -f1)
                   if [ "$first" -eq 0 ]; then echo "    ,"; fi
                   first=0
@@ -348,6 +486,7 @@ jobs:
                   echo "      \"version\": \"${ver}\","
                   echo "      \"php_api_no\": \"${PHP_API_NO}\","
                   echo "      \"zts\": 1,"
+                  echo "      \"zend_extension\": ${zend_ext},"
                   echo "      \"sha256\": \"${sha}\""
                   echo "    }"
                 done
@@ -387,9 +526,13 @@ jobs:
 
   release:
     name: Create extension release
-    needs: build-extensions
+    needs: [setup, build-extensions]
+    # Only main publishes. A branch run would otherwise replace the
+    # production ext-<ver> assets with .so files built from whatever pie
+    # resolves today; branch runs are validated from their workflow artifacts.
     if: |
       always()
+      && github.ref == 'refs/heads/main'
       && needs.build-extensions.result != 'failure'
     runs-on: [self-hosted, linux, x64]
     permissions:
@@ -411,6 +554,7 @@ jobs:
         with:
           tag_name: ext-${{ inputs.php_version }}
           name: PHP ${{ inputs.php_version }} ZTS extensions
+          prerelease: ${{ needs.setup.outputs.prerelease == 'true' }}
           body: |
             Loadable ZTS glibc (gnu) shared extensions for ephpm PHP ${{ inputs.php_version }}.
 
@@ -418,11 +562,16 @@ jobs:
             **Requested extensions:** ${{ inputs.extensions }}
 
             These .so files match the ephpm ABI: same PHP minor + ZTS + glibc +
-            non-debug. Load them via ephpm `[php] extensions = [...]`. Debian and
-            Sury publish no ZTS extension builds, so this is the primary source.
+            non-debug. Load regular extensions via ephpm `[php] extensions = [...]`.
+            Debian and Sury publish no ZTS extension builds, so this is the
+            primary source.
 
             Each tarball contains the `.so` files plus a `manifest.json`
-            (ext name, version, php_api_no, zts=1, sha256 per file).
+            (ext name, version, php_api_no, zts=1, zend_extension, sha256 per
+            file). Entries with `"zend_extension": true` (xdebug) must be loaded
+            with `zend_extension=<absolute path>`, not `extension=`.
+
+            **Xdebug:** ${{ needs.setup.outputs.xdebug-version }} (pinned)
 
             ## Artifacts
 
