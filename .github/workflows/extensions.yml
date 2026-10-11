@@ -808,9 +808,13 @@ jobs:
 
             **macOS:** needs an ephpm binary linked with `-export_dynamic`
             (releases after v0.11.3); older macOS binaries fail with `symbol
-            not found in flat namespace`. macOS binds a bundle's symbols at
-            load time, so list an extension after the ones it depends on:
-            `igbinary` (and `msgpack`, if used) before `redis`.
+            not found in flat namespace`.
+
+            **Load order (every platform):** PHP is built with
+            `--enable-rtld-now`, so an extension's symbols bind when it loads.
+            List an extension after the ones it depends on: `igbinary` and
+            `msgpack` before `redis`. The manifest order is alphabetical and
+            is not a load order.
 
             Each tarball contains the `.so` files plus a `manifest.json`
             (ext name, version, php_api_no, zts=1, zend_extension, sha256 per
