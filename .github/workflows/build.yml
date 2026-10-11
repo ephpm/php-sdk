@@ -36,7 +36,10 @@ on:
           suffix (e.g. -forktest) so they can never contaminate production
           tags. Incident 2026-07-13: a validation build dispatched from a
           side branch uploaded to plain v8.5.7 and overwrote 4 production
-          assets (since restored). Leave empty for production releases."
+          assets; only two were restored (macos-aarch64 and linux-aarch64
+          musl kept a PHP 8.5.8-dev build). Production (unsuffixed) uploads
+          are refused unless dispatched from main. Leave empty for
+          production releases."
         required: false
         type: string
         default: ""
@@ -2093,6 +2096,46 @@ jobs:
 
       - name: List artifacts
         run: ls -lh artifacts/ || { echo "::error::no artifacts produced"; exit 1; }
+
+      # Production tags (no release_tag_suffix) are published from main only.
+      # The suffix rule alone depends on the dispatcher remembering it, and the
+      # 2026-07-13 incident run came from a side branch whose workflow predated
+      # both the suffix input and the per-leg version guards: it built the
+      # macOS and linux-aarch64 (musl) SDKs from a php-src fork branch tip
+      # (PHP_VERSION 8.5.8-dev) and uploaded them over v8.5.7. Those two
+      # assets were never restored, and the ephpm macOS binaries labelled
+      # php8.5.7 (v0.5.1 through v0.11.3) shipped 8.5.8-dev. A side branch cut from main now
+      # inherits this gate.
+      - name: Refuse a production upload from a side branch
+        env:
+          SUFFIX: ${{ inputs.release_tag_suffix }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ -z "${SUFFIX}" ] && [ "${REF}" != "refs/heads/main" ]; then
+            echo "::error::refusing to upload to production tag v${{ inputs.php_version }} from ${REF}. Dispatch from main, or set release_tag_suffix (e.g. -forktest)."
+            exit 1
+          fi
+
+      # Each build leg already checks its own staged headers, but this is the
+      # last point before upload and covers every tarball in one place (a leg
+      # whose guard was skipped, edited, or missing on an older branch).
+      - name: Verify every tarball is the requested PHP version
+        env:
+          PHP_VERSION: ${{ inputs.php_version }}
+        run: |
+          set -eu
+          bad=0
+          for t in artifacts/*.tar.gz; do
+            staged=$(tar xzf "$t" -O --wildcards --no-anchored 'include/php/main/php_version.h' 2>/dev/null \
+              | sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' | head -n 1) || true
+            if [ "$staged" != "$PHP_VERSION" ]; then
+              echo "::error::$(basename "$t") contains PHP '${staged:-<no php_version.h>}', expected '$PHP_VERSION'"
+              bad=1
+            else
+              echo "==> $(basename "$t"): PHP $staged"
+            fi
+          done
+          exit "$bad"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
