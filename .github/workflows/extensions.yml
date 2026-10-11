@@ -801,10 +801,16 @@ jobs:
             **PHP version:** ${{ inputs.php_version }}
             **Requested extensions:** ${{ inputs.extensions }}
 
-            These .so files match the ephpm ABI: same PHP minor + ZTS + glibc +
-            non-debug. Load regular extensions via ephpm `[php] extensions = [...]`.
-            Debian and Sury publish no ZTS extension builds, so this is the
-            primary source.
+            These .so files match the ephpm ABI: same PHP minor + ZTS +
+            non-debug, and glibc on Linux. Load regular extensions via ephpm
+            `[php] extensions = [...]`. Debian and Sury publish no ZTS
+            extension builds, so this is the primary source.
+
+            **macOS:** needs an ephpm binary linked with `-export_dynamic`
+            (releases after v0.11.3); older macOS binaries fail with `symbol
+            not found in flat namespace`. macOS binds a bundle's symbols at
+            load time, so list an extension after the ones it depends on:
+            `igbinary` (and `msgpack`, if used) before `redis`.
 
             Each tarball contains the `.so` files plus a `manifest.json`
             (ext name, version, php_api_no, zts=1, zend_extension, sha256 per
