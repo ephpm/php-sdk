@@ -1,0 +1,31 @@
+# Trusted sha256 pins for tools/windows-shared/package.ps1, in sha256sum
+# format ("<hex> *<file name>"). Consulted before the live
+# windows.php.net/downloads/releases/sha256sum.txt, which only lists the
+# CURRENT patch release of each minor: older releases move to
+# releases/archives/, which publishes no checksum list, so building an older
+# pinned release needs its hashes here.
+#
+# Provenance:
+#   - php_xdebug-*.dll: copied from the SHA256 values published on
+#     https://xdebug.org/download (cross-checked against the downloaded files).
+#   - php-*-Win32-*.zip / php-devel-pack-*: hashed from the windows.php.net
+#     archives on 2026-10-10 (no upstream list exists for archived releases).
+#     A release that is still current is covered by the live list and needs
+#     no entry here; pin it before it is archived if it must stay buildable.
+
+# Xdebug 3.5.3 (ZTS, x64)
+c178f05068a6f0cef4a37eaca6003a56120004bf4ac20db6ff20f6f1ce0b439e *php_xdebug-3.5.3-8.3-ts-vs16-x86_64.dll
+b9c79caec87f2b289df4b7bfa64b64f01c97956c9ac7ddb936302b79aec65cda *php_xdebug-3.5.3-8.4-ts-vs17-x86_64.dll
+c75623ba050ddef734ba28a957e92df9ce5b8dfdb1a0569e5071bd6b68a12292 *php_xdebug-3.5.3-8.5-ts-vs17-x86_64.dll
+
+# PHP 8.3.33 (vs16)
+b089e370ff99eb7038b0d22617dec2f3a1d0e93ca26b11fd218f2f5b60422271 *php-8.3.33-Win32-vs16-x64.zip
+d58cedfa76b74b49f88ee54d25426700a27dad76dbad4732440cf28ca8267a7c *php-devel-pack-8.3.33-Win32-vs16-x64.zip
+
+# PHP 8.4.23 (vs17)
+6cb93c23c5e87237881f2b3d8b93fdd70ff04a4a32bc16c9cf846aeb17f518dc *php-8.4.23-Win32-vs17-x64.zip
+f2774e1534586769b90ad5550d4c1658f522bcca8d711a231d5d19abeaa7d25b *php-devel-pack-8.4.23-Win32-vs17-x64.zip
+
+# PHP 8.5.7 (vs17)
+0e8a7a368de950408e1df5d34a5a9deb3817e434007f28f310e6674354ed8d06 *php-8.5.7-Win32-vs17-x64.zip
+e59d547f68d42b08051f597d63df27781dc39b92163439b1267f5a7d753f64e4 *php-devel-pack-8.5.7-Win32-vs17-x64.zip
