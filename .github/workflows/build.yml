@@ -2104,7 +2104,7 @@ jobs:
       # macOS and linux-aarch64 (musl) SDKs from a php-src fork branch tip
       # (PHP_VERSION 8.5.8-dev) and uploaded them over v8.5.7. Those two
       # assets were never restored, and the ephpm macOS binaries labelled
-      # php8.5.7 (v0.5.1 through v0.11.2) shipped 8.5.8-dev. A side branch cut from main now
+      # php8.5.7 (v0.5.1 through v0.11.3) shipped 8.5.8-dev. A side branch cut from main now
       # inherits this gate.
       - name: Refuse a production upload from a side branch
         env:
