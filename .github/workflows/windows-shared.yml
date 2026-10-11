@@ -61,7 +61,16 @@ jobs:
           XDEBUG_VERSION: ${{ inputs.xdebug_version }}
         run: |
           if [ -n "$PHP_VERSION" ]; then
-            echo "matrix=[{\"php\":\"$PHP_VERSION\",\"xdebug\":\"${XDEBUG_VERSION:-3.5.3}\"}]" >> "$GITHUB_OUTPUT"
+            # Both values end up in the matrix JSON and are expanded into
+            # the pwsh step below, so only accept plain version strings.
+            XDEBUG_VERSION="${XDEBUG_VERSION:-3.5.3}"
+            if ! [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::php_version '$PHP_VERSION' must be a GA x.y.z version"; exit 1
+            fi
+            if ! [[ "$XDEBUG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9]+)?$ ]]; then
+              echo "::error::xdebug_version '$XDEBUG_VERSION' is not an Xdebug release version"; exit 1
+            fi
+            echo "matrix=[{\"php\":\"$PHP_VERSION\",\"xdebug\":\"$XDEBUG_VERSION\"}]" >> "$GITHUB_OUTPUT"
           else
             # PR check: the versions ephpm's xtask pins today (pinned
             # checksums path) - keep in step with checksums.txt.
