@@ -95,8 +95,8 @@ env:
   # NOTE on shmop/sockets: added for downstream consumers that ship them
   # (PAM's reviewed extension surface); sockets is also required by phpIPAM and
   # other apps that call socket_*(). `sockets` IS in WIN_PHP_EXTENSIONS: PHP's
-  # ext/sockets/config.w32 needs only ws2_32.lib + Iphlpapi.lib, both already
-  # linked by ext/standard and by ephpm's Windows link line. `shmop` is NOT —
+  # ext/sockets/config.w32 needs only ws2_32.lib + Iphlpapi.lib; ext/standard
+  # already links iphlpapi and ephpm links ws2_32. `shmop` is NOT —
   # PHP supports it on Windows, but it has never been through spc's Windows
   # toolchain here and the Windows leg is the longest and most fragile in this
   # workflow. Validate with a `release_tag_suffix` dispatch before adding it.

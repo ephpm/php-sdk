@@ -197,7 +197,7 @@ sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, xsl, zip, zlib
 
 The NTS variants additionally include `ffi`.
 
-Windows drops the Unix-only entries (`pcntl`, `posix`, `sysv*`), plus `gmp`, `pgsql` and `pdo_pgsql`, which static-php-cli cannot build statically on Windows today. It also does not yet carry `shmop` — PHP supports it there, but it has not been validated through spc's Windows toolchain from this repo. `sockets` is carried on Windows too (it needs only `ws2_32` and `Iphlpapi`, both already linked).
+Windows drops the Unix-only entries (`pcntl`, `posix`, `sysv*`), plus `gmp`, `pgsql` and `pdo_pgsql`, which static-php-cli cannot build statically on Windows today. It also does not yet carry `shmop` — PHP supports it there, but it has not been validated through spc's Windows toolchain from this repo. `sockets` is carried on Windows too (it needs only `ws2_32` and `Iphlpapi`).
 
 `ffi` is not in the shared extension set on purpose. static-php-cli's `ext-ffi` passes `--enable-zend-signals`, and extension arguments land after the target arguments on the configure line, so it would override the `--disable-zend-signals` that spc emits for ZTS builds — silently changing signal behavior in the SDK ePHPm links. NTS builds emit no `--disable-zend-signals`, so `ffi` rides along there.
 
