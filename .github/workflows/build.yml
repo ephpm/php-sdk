@@ -93,11 +93,13 @@ env:
   # `mbregex` in BOTH lists alongside `mbstring`.
   #
   # NOTE on shmop/sockets: added for downstream consumers that ship them
-  # (PAM's reviewed extension surface). They are NOT in WIN_PHP_EXTENSIONS —
-  # PHP supports both on Windows, but neither has ever been through spc's
-  # Windows toolchain here and the Windows leg is the longest and most
-  # fragile in this workflow. Validate with a `release_tag_suffix` dispatch
-  # before adding them there.
+  # (PAM's reviewed extension surface); sockets is also required by phpIPAM and
+  # other apps that call socket_*(). `sockets` IS in WIN_PHP_EXTENSIONS: PHP's
+  # ext/sockets/config.w32 needs only ws2_32.lib + Iphlpapi.lib; ext/standard
+  # already links iphlpapi and ephpm links ws2_32. `shmop` is NOT —
+  # PHP supports it on Windows, but it has never been through spc's Windows
+  # toolchain here and the Windows leg is the longest and most fragile in this
+  # workflow. Validate with a `release_tag_suffix` dispatch before adding it.
   #
   # NOTE on ffi: deliberately absent. spc's ext-ffi passes
   # `--enable-zend-signals`, and its extension args land AFTER the target
@@ -1053,7 +1055,7 @@ jobs:
     #     (links against LIBPQ.DLL) instead of a static build
     # Re-add as spc grows Windows support for its underlying library.
     env:
-      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
     steps:
       - name: Clean up previous builds
         shell: powershell
@@ -1606,7 +1608,7 @@ jobs:
     # Same extension set as the MSVC lane — the artifact must differ ONLY in
     # the compiler and VM kind.
     env:
-      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
+      WIN_PHP_EXTENSIONS: "bcmath,bz2,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gettext,hash,iconv,intl,mbregex,mbstring,mysqli,mysqlnd,opcache,openssl,pcre,pdo,pdo_mysql,pdo_sqlite,phar,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib"
       # Pinned LLVM toolchain (see job comment: VS-bundled clang 19 is slower
       # than MSVC; 22.1.8 is the measured-good floor).
       LLVM_VERSION: "22.1.8"
