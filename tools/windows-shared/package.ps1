@@ -80,8 +80,8 @@ $WantedExtensions = @(
   'bcmath', 'bz2', 'calendar', 'ctype', 'curl', 'dom', 'mbstring', 'exif',
   'fileinfo', 'filter', 'ftp', 'gd', 'gettext', 'hash', 'iconv', 'intl',
   'mysqlnd', 'mysqli', 'opcache', 'openssl', 'pcre', 'pdo', 'pdo_mysql',
-  'pdo_sqlite', 'phar', 'session', 'simplexml', 'soap', 'sodium', 'sqlite3',
-  'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'
+  'pdo_sqlite', 'phar', 'session', 'simplexml', 'soap', 'sockets', 'sodium',
+  'sqlite3', 'tokenizer', 'xml', 'xmlreader', 'xmlwriter', 'xsl', 'zip', 'zlib'
 )
 # Loaded with zend_extension= rather than extension= when shipped as a DLL
 # (PHP 8.3/8.4; 8.5 compiles OPcache into php8ts.dll).
