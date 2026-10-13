@@ -4,6 +4,8 @@ Pre-built PHP embed SAPI static libraries (`libphp.a` / `php8embed.lib`) plus he
 
 Built with [static-php-cli](https://github.com/crazywhalecc/static-php-cli) — specifically the [`luthermonson/static-php-cli`](https://github.com/luthermonson/static-php-cli) fork, pinned by `SPC_VERSION` in `.github/workflows/build.yml`. Every SDK is a `spc build --build-embed` output: a static `libphp.a`, never a shared `libphp.so`.
 
+The Windows legs run a locally patched copy of that release's `spc-windows-x64.exe`. From rc19 on, spc can deadlock on Windows whenever a child process writes to stderr (it polls two pipes that PHP cannot make non-blocking there), and the openssl build always hits it. The `spc-windows` job in `build.yml` merges the child's stderr into stdout before the Windows builds use spc. The patch is `tools/spc-windows/patch-spc-passthru.php`, which explains the bug and accepts only the spc binaries it was written for, matched by sha256. Bumping `SPC_VERSION` therefore fails that job until the patch is re-checked against the new release, or removed once the fork fixes the bug.
+
 ## What this builds
 
 | Platform | Tarball suffix | Output |
