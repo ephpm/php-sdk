@@ -22,7 +22,7 @@
  * WriteFile, never writes stdout again, and the two wait on each other. The
  * reverse order deadlocks the same way. In the Windows SDK build this fires
  * in `jom.exe /j8 install_dev` for openssl: the log stops right after the two
- * util\mkinstallvars.pl lines, jom sits at 0% CPU with no children, and the
+ * util\mkinstallvars.pl lines, jom sits idle (CPU time flat) with no children, and the
  * job is cancelled at its 119-minute timeout. Every Windows build that got
  * past the download step since rc19 hung there.
  *
@@ -120,6 +120,16 @@ foreach ($edits as [$needle, $replacement]) {
         fail("expected exactly 1 occurrence of " . json_encode($needle) . " in Shell.php, found {$n}");
     }
     $src = str_replace($needle, $replacement, $src);
+}
+
+// Lint the edited file here: a syntax slip would otherwise surface only on a
+// Windows runner, after its 10+ minutes of setup.
+$lintFile = $work . DIRECTORY_SEPARATOR . 'Shell.php';
+file_put_contents($lintFile, $src);
+exec(escapeshellarg(PHP_BINARY) . ' -l ' . escapeshellarg($lintFile) . ' 2>&1', $lintOut, $lintRc);
+@unlink($lintFile);
+if ($lintRc !== 0) {
+    fail("patched Shell.php does not parse:\n" . implode("\n", $lintOut));
 }
 
 $phar->startBuffering();

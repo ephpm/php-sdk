@@ -1042,7 +1042,8 @@ jobs:
   # polls them in turn. On Windows a "non-blocking" fread() on an empty
   # proc_open pipe actually spins PeekNamedPipe+usleep for up to 3.2M rounds,
   # so while spc waits on one pipe nobody drains the other: a child that writes
-  # 4 KiB to stderr while stdout is idle blocks forever, and spc with it. That
+  # 4 KiB to stderr while stdout is idle blocks until that spin gives up (~1 h to
+  # many hours, far past the job timeout), and spc with it. That
   # is the openssl `jom.exe /j8 install_dev` hang that cancelled every Windows
   # build at the 119-minute timeout since rc19 (last good Windows SDK: rc18,
   # 2026-08-12); full write-up in tools/spc-windows/patch-spc-passthru.php.
