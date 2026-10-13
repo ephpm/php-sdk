@@ -2188,7 +2188,11 @@ jobs:
           set -eu
           bad=0
           for t in artifacts/*.tar.gz; do
+            # tr -d '\r': the clang lane builds from a git checkout of php-src
+            # on Windows, so its headers are CRLF. Without this the trailing
+            # \r survives the sed and an 8.5.11 tarball reads as "8.5.11\r".
             staged=$(tar xzf "$t" -O --wildcards --no-anchored 'include/php/main/php_version.h' 2>/dev/null \
+              | tr -d '\r' \
               | sed -n 's/^#define PHP_VERSION "\(.*\)"/\1/p' | head -n 1) || true
             if [ "$staged" != "$PHP_VERSION" ]; then
               echo "::error::$(basename "$t") contains PHP '${staged:-<no php_version.h>}', expected '$PHP_VERSION'"
