@@ -44,6 +44,11 @@ declare(strict_types=1);
 const PINNED_SHA256 = [
     // luthermonson/static-php-cli v3.0.0-pgo-rc20 spc-windows-x64.exe
     'v3.0.0-pgo-rc20' => '7ec62fe3451c615f9dcdbca5fd1e3287b27825d1c2a3d11e5fedadfdf5cfe32b',
+    // v3.0.0-pgo-rc21: merged upstream v3 (PHP 8.6). Shell.php's Windows path now
+    // polls both pipes with non-blocking reads, but the two needles below are
+    // unchanged, so this patch still collapses stderr into stdout (one pipe to
+    // drain) -- correct regardless of whether the poll deadlocks on this host.
+    'v3.0.0-pgo-rc21' => '7f0dbb6f2e83199cb97ae8888cafd6a01f430bd303bf0e497364619289f284ff',
 ];
 const SHELL_PHP = 'src/StaticPHP/Runtime/Shell/Shell.php';
 const MARKER = 'php-sdk: stderr merged into stdout on Windows';

@@ -73,7 +73,14 @@ env:
   # Nothing consumes that yet -- it needs published prebuilt artifacts -- but it
   # is the unblock for the library that dominates the dependency phase: gettext
   # is 85s of 336s here and barely improves with more cores.
-  SPC_VERSION: "v3.0.0-pgo-rc20"
+  #
+  # rc21 merges upstream crazywhalecc/static-php-cli v3 into the fork's pgo-rc
+  # line, bringing upstream's native PHP 8.6 support (cli_checks_86.patch, the
+  # 8.6 patch-selector entry, windows.php's >= 80600 VS2026/v144 branches, the
+  # removed-macro-compat header). rc20 had no 8.6 entry, so a GA 8.6.0 build
+  # mis-resolved the patch selector to *_80 and failed before configure. The
+  # fork-only ephpm bits (opcache SAPI allowlist, GHREL_PROXY) are preserved.
+  SPC_VERSION: "v3.0.0-pgo-rc21"
   # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
   # rejects SAPI names it doesn't know, so embed-based runtimes get
   # opcache_get_status() === false even with opcache.enable=1. The spc fork
