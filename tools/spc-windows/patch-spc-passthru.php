@@ -49,6 +49,9 @@ const PINNED_SHA256 = [
     // unchanged, so this patch still collapses stderr into stdout (one pipe to
     // drain) -- correct regardless of whether the poll deadlocks on this host.
     'v3.0.0-pgo-rc21' => '7f0dbb6f2e83199cb97ae8888cafd6a01f430bd303bf0e497364619289f284ff',
+    // v3.0.0-pgo-rc22: rc21 + a Windows artifact-extraction fix (does not touch
+    // Shell.php), so the two needles are unchanged and this patch still applies.
+    'v3.0.0-pgo-rc22' => '609420468bad20bf8ba4a021f73ffbf0be1cb0a103f03771a62f676b5153d667',
 ];
 const SHELL_PHP = 'src/StaticPHP/Runtime/Shell/Shell.php';
 const MARKER = 'php-sdk: stderr merged into stdout on Windows';
