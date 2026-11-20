@@ -80,10 +80,12 @@ env:
   # removed-macro-compat header). rc20 had no 8.6 entry, so a GA 8.6.0 build
   # mis-resolved the patch selector to *_80 and failed before configure. The
   # fork-only ephpm bits (opcache SAPI allowlist, GHREL_PROXY) are preserved.
-  # rc22 adds a Windows artifact-extraction fix on top of rc21 (the merge left a
-  # call to a DefaultShell method upstream removed; it only hit Windows, which
-  # extracts via 7za rather than tar).
-  SPC_VERSION: "v3.0.0-pgo-rc22"
+  # rc22/rc23 fix Windows artifact extraction (Linux/macOS extract via tar and
+  # were unaffected). The merge had dropped the fork's 7za-only extraction;
+  # upstream's "7za -so | tar" pipe then failed on archives shipping symlinks
+  # (zstd: tar.exe cannot create them on Windows). rc23 restores the 7za-only
+  # path (7za silently skips symlinks).
+  SPC_VERSION: "v3.0.0-pgo-rc23"
   # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
   # rejects SAPI names it doesn't know, so embed-based runtimes get
   # opcache_get_status() === false even with opcache.enable=1. The spc fork
