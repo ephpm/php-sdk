@@ -54,6 +54,9 @@ const PINNED_SHA256 = [
     'v3.0.0-pgo-rc22' => '609420468bad20bf8ba4a021f73ffbf0be1cb0a103f03771a62f676b5153d667',
     // v3.0.0-pgo-rc23: Windows 7za-only extraction restored (Shell.php unchanged).
     'v3.0.0-pgo-rc23' => '7b1946ea852f7219652e52748ead2d423a2c028d6c221fc61a5424edcedcb3ed',
+    // v3.0.0-pgo-rc24: 8.6 Windows fixes (mswsock.lib for TransmitFile; non-binary
+    // patch fallback for the clang-cl lane). Shell.php unchanged, patch still applies.
+    'v3.0.0-pgo-rc24' => 'da277a62dd3cf61b60939c851ecb151c78652eb4c1e4c3b6809618f47b522209',
 ];
 const SHELL_PHP = 'src/StaticPHP/Runtime/Shell/Shell.php';
 const MARKER = 'php-sdk: stderr merged into stdout on Windows';

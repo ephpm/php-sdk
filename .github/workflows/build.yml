@@ -84,8 +84,11 @@ env:
   # were unaffected). The merge had dropped the fork's 7za-only extraction;
   # upstream's "7za -so | tar" pipe then failed on archives shipping symlinks
   # (zstd: tar.exe cannot create them on Windows). rc23 restores the 7za-only
-  # path (7za silently skips symlinks).
-  SPC_VERSION: "v3.0.0-pgo-rc23"
+  # path (7za silently skips symlinks). rc24 adds two 8.6 Windows fixes: link
+  # mswsock.lib for 8.6's TransmitFile (php_io_copy) in the embed smoke test,
+  # and fall back to non-binary `patch` so the clang-cl lane's LF php-src still
+  # takes the CRLF static_extensions_win32 patch.
+  SPC_VERSION: "v3.0.0-pgo-rc24"
   # OPcache's supported_sapis allowlist (PHP < 8.5 only; 8.5 removed it)
   # rejects SAPI names it doesn't know, so embed-based runtimes get
   # opcache_get_status() === false even with opcache.enable=1. The spc fork
